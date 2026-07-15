@@ -21,6 +21,8 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Automated Picon Sync für Stream-Bouquet-Einträge ohne eigenes Picon
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
+Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
+
 ## Voraussetzungen
 
 - Linux-Build-Host (getestet unter Debian)

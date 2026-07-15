@@ -1,0 +1,80 @@
+# Changelog
+
+Vollständige Liste der eigenen Fixes und Erweiterungen gegenüber den jeweiligen Upstream-Quellen (siehe [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)). Kurzfassung im [README](README.md#eigene-erweiterungen-auswahl).
+
+## ServiceApp
+
+### Frühe eTimer-/eConnection-ABI-Stabilität
+
+Der erste größere Stabilitätsblock: `eTimer`-Objekte (über `eTimer::create()` erzeugt) enthalten intern ein `pthread_mutex_t` an Offset `+8`, das von der geschlossenen VTi-Konstruktor-Kette nie sauber initialisiert wird, wenn man mit modernem glibc/GCC dagegen baut — reines `operator new` nullt den Speicher nicht, der Mutex enthält Datenmüll. Das führte zu Freezes/Abstürzen quer durchs Plugin.
+
+Ein `initTimerMutex()`-Helper (`pthread_mutex_init()` manuell an `timer+8`) wird seither nach jedem `eTimer::create()`-Aufruf im ganzen Baum aufgerufen (Subtitle-Sync-Timer, Event-Updated-Info-Timer, EPG-Nownext-Timer, Positions-Timer, Konsolen-Poll-Timer), plus jeweils ein `AddRef()`, damit Enigma2s Mainloop das Objekt nicht vorzeitig freigibt. `eConnection` (für Signal/Slot-Verbindungen wie `connectEvent()`) hatte dasselbe Problem und bekam dieselbe Behandlung: manuelle, genullte Allokation mit etwas Padding statt normalem `new`, per Placement-New.
+
+Daneben wurden mehrere verwandte Speicherfehler behoben: ein Use-after-free in `eConsoleContainer` bei den Event-Slots `readyRead`/`appClosed`, Speicherkorruption durch C++14-„sized deallocation“ beim Aufräumen von Timern, und ein Absturz im eTimer-Destruktor der geschlossenen VTi-Binary.
+
+### Enigma2-ABI-Kompatibilität (VTi-Kompatibilität)
+
+VTi basiert auf einer älteren, geschlossenen Enigma2-Version mit eigenem Speicherlayout, das von öffentlich verfügbaren SDK-Headern in mehreren Punkten abweicht:
+
+- **evEOF-Event-Mismatch:** Das öffentliche Sysroot definiert das Event `evNewProgramInfo` an Index 6, das VTi selbst nicht kennt — dadurch verschieben sich alle nachfolgenden Event-Indizes (`evEOF` landet auf 8 statt 7). Das Plugin, das einen Stream gestartet hat, bekam dadurch nie ein Signal, wenn der Stream abbrach. Fix: `evNewProgramInfo` aus dem Sysroot-Header entfernt.
+- **VTable-Offset-Fix (Untertitel, Pause, Tonspur, Spulen):** Eine leere Hilfsklasse ohne virtuellen Destruktor wurde vom Compiler auf 0 Byte wegoptimiert, wodurch ein Interface in der Mehrfachvererbungshierarchie von `eServiceApp` am falschen Offset lag. Ein erster Versuch (virtueller Destruktor ergänzen) verschob zwar das eine Interface korrekt, verschob dabei aber die komplette VTable von `iPlayableService` und brach dadurch andere, fest kompilierte Methodenaufrufe (Absturz beim Start jeder Wiedergabe). Die tatsächliche Lösung: nur die Reihenfolge der zusätzlichen Basisklassen in `eServiceApp` an VTis natives `eServiceMP3` angepasst, ohne die VTable von `iPlayableService` selbst zu verändern.
+- **getInfoObject-VTable-Mismatch:** Die öffentlich verfügbaren VTi-SDK-Header deklarieren `getInfoObject` mit einem Parameter weniger, als die tatsächlich kompilierte VTi-Binary erwartet — das verschob das komplette VTable-Layout dieser Klasse und führte beim Öffnen der Filmliste zu Stack-/Register-Korruption. Fix: Methodensignatur im Sysroot-Header korrigiert.
+- **ARMv7-Alignment-Trap:** GCC 14 erzeugt bei bestimmten Struct-Zugriffen `LDRD`-Doppelwort-Ladebefehle, die auf ARMv7 eine 8-Byte-Ausrichtung verlangen, während die Structs im RAM nur 4-Byte-ausgerichtet sind — Kernel Alignment Trap. Fix: `-mno-unaligned-access`.
+- **Glibc-Version-Pinning & Stubs:** Moderne Compiler verlinken Funktionen wie `memcpy`/`clock_gettime`/`posix_spawn` gegen neuere glibc-Symbolversionen, als auf den Boxen vorhanden sind. Eigene Kompatibilitäts-Wrapper (`glibc_compat.c`) plus ein Header, der den Linker zwingt, ältere Symbolversionen zu verwenden (`glibc_version_pin.h`), plus Python-Skripte, die die fertig kompilierten ELF-Binaries nachträglich patchen.
+
+### HLS, Audio & Untertitel
+
+- **HLS-Audio-Track-Filter (`suburi`):** HLS-Streams mit getrenntem Audio-Track werden korrekt als separates Argument an exteplayer3 übergeben.
+- **RFC-3986-URL-Auflösung:** Absolute Pfade in M3U8-Playlists wurden falsch aufgelöst; Fix extrahiert und nutzt den Origin der Master-URL korrekt.
+- **HLS-Startqualität & Default-Audio-Filter (Settings):** Neue Einstellungen für die Startqualität (Auto/Niedrigste/Höchste Bandbreite) sowie einen Filter, der nur die als Standard markierte Audiospur pro Sprachgruppe behält — wirkt sowohl im serviceapp-eigenen HLS-Explorer als auch (über `-Q`/`-D`-Flags) direkt in exteplayer3.
+- **Untertitel-Toggle-Fix:** Beim Deaktivieren von Untertiteln wurde exteplayer3 nie mitgeteilt, das Decodieren zu stoppen — der Player dekodierte intern weiter, ohne dass etwas angezeigt wurde. Beim Aktivieren einer eingebetteten Spur wurde ein bereits gepufferter Untertitel nicht sofort angezeigt, sondern erst beim nächsten Timer-Tick. Beides behoben: `subtitleSelectTrack(-1)` stoppt jetzt explizit die Decodierung, `enableSubtitles()` pullt bei eingebetteten Spuren sofort.
+- **Leerzeichen-Kodierung in URLs:** Manche Plugins bauen ihre Service-URL aus mehreren Teilen zusammen, die im Klartext Leerzeichen enthalten können (z. B. Zugangsdaten als Kommandozeilen-Parameter in einer Proxy-URL). Ein unkodiertes Leerzeichen zerschnitt die HTTP-Anfragezeile beim Zielserver. Leerzeichen werden jetzt automatisch zu `%20` kodiert — allerdings zunächst mit zwei Regressionen: einmal spielten dadurch lokale Dateien mit Leerzeichen im Namen nicht mehr (Fix: Kodierung erst nach Bestätigung, dass es sich um eine echte Netzwerk-URL handelt), und `file://`-Pfade wurden trotzdem fälschlich als Netzwerk-URL erkannt (Fix: `file://` explizit ausgenommen).
+
+### EPG
+
+- **EPG bei Streaming-Bouquet-Einträgen:** Bouquet-Einträge, die per SID/TSID/ONID/Namespace-Piggyback die EPG-Daten eines real empfangenen Kanals mitnutzen, wurden beim EPG-Abgleich ignoriert und fielen auf einen falschen internen Typ zurück. Fix: Der vom Bouquet-Eintrag übernommene Referenztyp wird jetzt zuerst geprüft.
+- **EPG-Anzeige in der Senderlisten-Vorschau:** `-DHAVE_EPG` fehlte im Build, wodurch der komplette EPG-Lookup-Code seit jeher wegkompiliert war. Die Infobar funktionierte trotzdem über einen Python-seitigen Fallback, die Senderlisten-Mini-Vorschau hat diesen Fallback aber nicht. Aktivieren von `-DHAVE_EPG` zog einen größeren DVB-Header nach sich, der zunächst zu neuen Abstürzen führte; gelöst durch einen minimalen Header-Stub statt der vollen Klassenhierarchie, plus eigene lokale Definitionen für zwei zur Laufzeit fehlende Symbole (`debugLvl`, `eDebugImpl`). Auf MIPS waren zusätzlich drei weitere, dort strenger geprüfte fehlende Symbole zu ergänzen (`std::stringstream`-Ersatz, `eConnection`-Referenzzählung, `eTimer::startLongTimer`).
+- **EPG-Speicherleck & Absturzsicherheit:** Der EPG-Abgleich (`updateEpgCacheNowNext`/`getEvent`) konnte sporadisch abstürzen und leakte pro periodischem Refresh zwei EPG-Objekte. Umgestellt auf die für manuelles Freigeben vorgesehene rohe API von `eEPGCache::lookupEventTime()` statt riskanter Smart-Pointer-Konstruktion über die ABI-Grenze hinweg, mit explizitem Aufräumen der alten Zeiger. Zusätzlich Self-Destruction-Guards in den Callback-Einstiegspunkten ergänzt.
+
+### Prozess-Handling
+
+- **Adaptives, sauberes Prozess-Beenden:** Der „Force stop“-Pfad nutzte ursprünglich nur ein asynchrones SIGINT ohne Warten auf das tatsächliche Prozessende — das ließ den Hardware-Decoder mitunter weiterlaufen (Nachlaufen von Bild/Ton) und konnte bei schnell aufeinanderfolgenden Play-Anfragen zu Zombie-Prozessen führen. Jetzt: erst reguläres Stop-Kommando senden und bis zu 950 ms adaptiv auf sauberes Beenden warten, dann SIGINT mit Live-Überwachung des Prozessstatus, erst nach 100 ms Fallback auf SIGKILL mit synchronem `waitpid()`.
+- **Prozess-Reaping:** Nach SIGKILL wird zuverlässig `waitpid()` aufgerufen, um Zombie-Prozesse zu vermeiden.
+- **Reentrancy-/Double-free-Absturz beim Streamwechsel:** Ein kompletter Box-Absturz beim Zurückschalten von einem Stream (z. B. Zattoo) auf einen linearen Sender, häufiger bei aktivem Fast-Channel-Change. Ursache: Der Destruktor rief `stop()` ein zweites Mal auf, redundant zum bereits erfolgten expliziten Stop. Unter ungünstigem Timing konnte dieser zweite Aufruf eine echte Prozessend-Benachrichtigung einfangen und darüber einen Referenzzähler-Zyklus auslösen, der das Objekt ein zweites Mal während der laufenden Zerstörung löschte. Fix: ein `m_stopping`-Flag verhindert den zweiten, redundanten Aufräumdurchlauf.
+
+### Sonstiges / Features
+
+- **Debug-Logging als Schalter:** Das Logging (`/tmp/serviceapp.log`) lief bisher immer mit und wuchs bei aktiver Wiedergabe kontinuierlich — riskant, da `/tmp` auf den Boxen eine RAM-Disk ist. Jetzt ein eigener Schalter im Setup, standardmäßig deaktiviert.
+- **Automated Picon Sync:** Sender vom Typ 5001/5002 (Stream-Referenzen) zeigten kein Picon, obwohl für den zugrunde liegenden echten DVB-Sender längst eines vorhanden war — VTi hat den entsprechenden automatischen Fallback nur für einen anderen Referenztyp. Ein opt-in Schalter durchsucht die Bouquet-Dateien und legt passende Symlinks an.
+- **Feature-Detection für Drittanbieter-Plugins:** Ein `__version__`-String sowie ein eigenes, leichtgewichtiges Modul mit expliziten Capability-Flags, damit andere Plugins zur Laufzeit prüfen können, welche Fähigkeiten die installierte Version hat.
+
+## exteplayer3
+
+- **ARMv7-Alignment & Glibc-Kompatibilität:** Dieselben Fixes wie bei ServiceApp (`-mno-unaligned-access`, `glibc_compat.c`-Stubs).
+- **Isolierter Library-Pfad:** Kompilierung mit `-Wl,-rpath,/usr/lib/exteplayer3_deps`, damit exteplayer3 seine eigenen FFmpeg-Bibliotheken lädt und die System-Bibliotheken unangetastet bleiben.
+- **DVB-Hardware-Kompatibilität:** Eigener Header/Patch für fehlende Broadcom-DVB-ioctl-Definitionen in der modernen Cross-Toolchain.
+- **Post-181-Upstream-Fixes:** Drei Commits aus dem Upstream-Repository nachgezogen, die im ursprünglich verfügbaren Referenzpaket noch fehlten: MOV_TEXT-Untertitelunterstützung, `X-DRM-Api-Level`-Header, korrektes Handling von `iptv://`-URLs.
+- **Native HLS-Startqualität & Audio-Filter (`-Q`/`-D`):** exteplayer3s eigener FFmpeg-HLS-Parser nahm bisher immer das erste Programm einer Master-Playlist (oft die niedrigste Bandbreite) und lud alle Audio-Renditionen unverändert. Zwei neue Flags wählen das Programm nach Bandbreite bzw. verwerfen alle Audio-Renditionen außer der mit `DEFAULT=YES` (nur falls eine solche existiert).
+- **Netzwerk-Timeout-Erkennung überarbeitet:** Die bisherige Unterscheidung „Live-Stream (verträgt Lesefehler) vs. Datei-Ende (schließt sofort)“ beruhte auf einer unzuverlässigen Dauer-Schätzung. Manche Proxy-Streams meldeten eine falsche, endliche Dauer und wurden dadurch beim ersten Lesefehler sofort geschlossen, statt eine Gnadenfrist zu bekommen. Jetzt wird direkt auf ein echtes `AVERROR_EOF` geprüft; jeder andere Fehler bekommt einheitlich 10 Sekunden, bevor tatsächlich geschlossen wird.
+- **Schnelleres Thread-Cleanup:** Das synchrone Warten auf das Ende des FFmpeg-Lese-Threads wurde von festen 100-ms-Schritten auf ein adaptives 5-ms-Intervall verkürzt.
+
+## FFmpeg
+
+Eigener Cross-Build aus dem offiziellen Vanilla-Tarball, mit einer kleineren, auf HLS-Wiedergabe zugeschnittenen Konfiguration statt einer allgemeinen Distribution:
+
+- `--cpu=cortex-a15` statt `generic`, `--enable-neon`/`--enable-vfp` aktiv — spürbar bessere Decoding-Performance auf ARMv7.
+- `libx264`, `libbluray`, `libxml2`, `librtmp`, `bzlib`, `avdevice` bewusst deaktiviert (auf der Box nicht benötigt, spart RAM/Flash).
+- Zlib statisch statt dynamisch gelinkt, um Symbolkonflikte mit dem System-Linker zu vermeiden.
+- **fstat/stat-Symbol-Lücke:** Moderne Build-Host-Glibc kennt die alte, multiplexte `__fxstat`/`__xstat`-Schnittstelle nicht mehr, FFmpeg ruft deshalb direkt `fstat`/`stat` auf, die auf der Box-Glibc unter keiner Version exportiert sind. Fiel nie auf, solange nur Netzwerk-URLs abgespielt wurden — sichtbar wurde es erst bei jedem lokalen Dateizugriff (z. B. wenn ein Proxy intern das eigene `ffmpeg` zum Muxen zweier Named-Pipe-Substreams aufruft). Fix: Hidden-Visibility-Wrapper, die auf die passenden Box-Symbole umleiten.
+- **Zlib fehlte im Cross-Build:** Der Cross-Sysroot hatte ursprünglich keine Zlib-Header/-Bibliothek, wodurch FFmpegs `configure` Zlib beim Cross-Compile still deaktivierte (kein Build-Fehler, kein Hinweis). Live-Streams brachen dadurch ab, sobald ein CDN eine `.m3u8`-Playlist gzip-komprimiert auslieferte. Fix: Zlib für die jeweilige Zielarchitektur cross-kompiliert/eingebunden.
+- **Native HLS-Stream-Vorauswahl:** Eigener Patch direkt im FFmpeg-HLS-Demuxer, der ungenutzte Bitraten-Varianten und Audio-/Untertitel-Renditions gar nicht erst öffnet/herunterlädt, statt sie nachträglich zu verwerfen. Details in [docs/hls_preselection_documentation.md](docs/hls_preselection_documentation.md). Der Patch ging durch drei Nachbesserungsrunden: zunächst fehlte das explizite `needed=1`-Setzen für die gewählte Variante selbst (führte zu Segfaults bzw. komplett stummer Wiedergabe), dann fehlte dieselbe Markierung für die behaltene Audio-/Untertitel-Rendition, und schließlich sorgte eine `st->id`-Kollision zwischen Video- und gemuxtem Audio-Stream bei bestimmten Playlist-Positionen für lautlos verworfene Audio-Pakete.
+- **HLS-Seek-Absturz:** Der Preselect-Patch lässt `pls->ctx` für nicht-selektierte Varianten dauerhaft `NULL`. FFmpegs eigene `hls_read_seek()`-Funktion iteriert bei jedem Seek aber über alle Playlists und dereferenziert diesen Zeiger ungeprüft — garantierter Absturz bei jedem Sprung auf einem Multi-Bitrate-VOD-Stream. Fix: derselbe Schutz wie in der bestehenden „Open demuxer“-Schleife auch in `hls_read_seek()` ergänzt.
+- **Build-Skript-Robustheit:** Das Build-Skript kopierte neu gebaute Shared-Libs zusätzlich zu bereits vorhandenen Dateien, ohne das Zielverzeichnis vorher zu leeren — nach einem Versionswechsel blieben alte `.so`-Dateien liegen und konnten mit ins fertige Paket gelangen. Fix: Zielverzeichnis wird vor jedem Kopierschritt geleert.
+
+## MIPS-spezifisch (mips32el, VU+ Solo2)
+
+Die MIPS-Build-Umgebung teilt sich den kompletten C++/Python-Quellcode mit ARM, nutzt aber eigene Compiler-Flags und musste drei zusätzliche, architekturspezifische Bugs lösen, die auf ARM nicht auftreten:
+
+- **SIGILL bei HTTPS/HLS-Streams:** Die verfügbare Cross-Toolchain liefert eine vorkompilierte `libgcc.a`, die für die MIPS32r2-Baseline gebaut ist. Die Ziel-CPU ist aber MIPS32r1. Sobald FFmpeg-Code einen impliziten Compiler-Helfer braucht (Byte-Swap, int64/float-Konvertierung), zieht der Linker das passende `libgcc.a`-Objekt mit fest einkompilierten r2-Instruktionen ins Binary — unabhängig von den eigenen Compiler-Flags, da es sich um ein bereits fertig kompiliertes Archiv-Member handelt. Fix: portable, r1-saubere C-Ersatzfunktionen, die vor `-lgcc` gelinkt werden, sodass der Linker das jeweilige libgcc-Member gar nicht erst zieht.
+- **Sporadischer Absturz bei der ersten Settings-Änderung:** Der erste Schreibzugriff auf eine globale Options-Struct crashte reproduzierbar beim ersten Aufruf nach dem Laden der Bibliothek — ein Page-Fault bei der Lazy-BSS-Allokation, kombiniert mit einem MIPS-spezifischen Signal-Handler-Wiedereintrittsproblem. Fix: alle globalen Options-Structs werden beim Laden der Bibliothek einmalig „vorab berührt“, bevor Python irgendwelche Set-Aufrufe machen kann.
+- **Keine laufende Zeitanzeige bei VOD-Wiedergabe:** Der oben beschriebene `timer+8`-Mutex-Init-Offset wurde ursprünglich nur für ARM ermittelt und passte nicht zu MIPS' Speicherlayout — der Schreibzugriff landete auf falschen/benachbarten Timer-Feldern und legte den internen Update-Timer lahm. Fix: Die manuelle Mutex-Initialisierung wird auf MIPS komplett übersprungen; ein komplett genullter Puffer entspricht bei glibc/NPTL ohnehin bitweise exakt der Standard-Initialisierung, der eigene Schreibzugriff war selbst das Problem.
