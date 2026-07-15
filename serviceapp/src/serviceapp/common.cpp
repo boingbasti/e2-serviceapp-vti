@@ -1,0 +1,424 @@
+#include <dirent.h>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <stdint.h>
+#include <string>
+#include <sys/stat.h>
+
+#include "common.h"
+#include <lib/base/eerror.h>
+
+extern bool g_debugLoggingEnabled;
+#define SALOG(fmt, ...) do { \
+    if (g_debugLoggingEnabled) { \
+        FILE *_f = fopen("/tmp/serviceapp.log", "a"); \
+        if (_f) { fprintf(_f, "[serviceapp] " fmt "\n", ##__VA_ARGS__); fclose(_f); } \
+    } \
+} while(0)
+
+Url::Url(const std::string& url):
+    m_url(url),
+    m_port(-1)
+{
+    parseUrl(url);
+}
+
+void Url::parseUrl(std::string url)
+{
+    // Decode %3a / %3A to : in the URL to normalize it (e.g. http%3a// -> http://).
+    // Must happen before the "://" check below, since bouquet entries carry the
+    // scheme separator percent-encoded (e.g. "http%3a//...") - it isn't a literal
+    // "://" yet at this point.
+    size_t pos = 0;
+    while ((pos = url.find("%3a", pos)) != std::string::npos) {
+        url.replace(pos, 3, ":");
+        pos += 1;
+    }
+    pos = 0;
+    while ((pos = url.find("%3A", pos)) != std::string::npos) {
+        url.replace(pos, 3, ":");
+        pos += 1;
+    }
+
+    // Encode spaces to %20 in the URL to prevent bad HTTP request line syntax.
+    // Only for actual network URLs (scheme://...) - local filesystem paths
+    // must keep their literal spaces, they are never sent as an HTTP request line.
+    // file:// is excluded too: it's still a local path under the hood, and
+    // FFmpeg's file protocol never decodes %20 back to a space (it just strips
+    // "file:" and opens the rest literally), so encoding here would reintroduce
+    // the same "Resource not found" bug for bouquet entries that spell out file://.
+    if (url.find("://") != std::string::npos && url.compare(0, 7, "file://") != 0)
+    {
+        size_t space_pos = 0;
+        while ((space_pos = url.find(" ", space_pos)) != std::string::npos) {
+            url.replace(space_pos, 1, "%20");
+            space_pos += 3;
+        }
+    }
+
+    // Update m_url to the decoded version
+    m_url = url;
+
+    size_t delim_start = url.find("://");
+    if (delim_start == std::string::npos)
+        return;
+    // Strip '|key=value&...' header params (IPTV plugin convention)
+    size_t pipe_start = url.find('|');
+    size_t sep_len = 1;
+    if (pipe_start == std::string::npos) {
+        pipe_start = url.find("%7c");
+        if (pipe_start != std::string::npos) sep_len = 3;
+    }
+    if (pipe_start == std::string::npos) {
+        pipe_start = url.find("%7C");
+        if (pipe_start != std::string::npos) sep_len = 3;
+    }
+
+    if (pipe_start != std::string::npos)
+    {
+        m_fragment = url.substr(pipe_start + sep_len);
+        m_url = url = url.substr(0, pipe_start);
+    }
+    size_t fragment_start = url.find("#");
+    sep_len = 1;
+    if (fragment_start == std::string::npos) {
+        fragment_start = url.find("%23");
+        if (fragment_start != std::string::npos) sep_len = 3;
+    }
+
+    if (fragment_start != std::string::npos)
+    {
+        m_fragment = url.substr(fragment_start + sep_len);
+        m_url = url = url.substr(0, fragment_start);
+    }
+    m_proto = url.substr(0, delim_start);
+
+    std::string host, path;
+    size_t path_start = url.find("/", delim_start + 3);
+    if (path_start != std::string::npos)
+    {
+        path = url.substr(path_start);
+        host = url.substr(delim_start + 3, path_start - delim_start - 3);
+    }
+    else
+    {
+        host = url.substr(delim_start);
+    }
+    size_t port_start = host.find(":");
+    if (port_start != std::string::npos)
+    {
+        m_port = atoi(host.substr(port_start + 1).c_str());
+        host = host.substr(0, port_start);
+    }
+    size_t query_start = path.find("?");
+    if (query_start != std::string::npos)
+    {
+        m_query = path.substr(query_start+1);
+        path = path.substr(0, query_start);
+    }
+    m_host = host;
+    m_path = path;
+}
+
+void splitExtension(const std::string &path, std::string &basename, std::string &extension)
+{
+    size_t filename_idx = path.find_last_of('/');
+    size_t extension_idx = path.find_last_of('.');
+    bool has_extension = (extension_idx != std::string::npos
+            && (filename_idx == std::string::npos || extension_idx > filename_idx));
+    if (has_extension)
+    {
+        basename = path.substr(0, extension_idx);
+        extension = path.substr(extension_idx);
+    }
+    else
+    {
+        basename = path;
+        extension = "";
+    }
+}
+
+void splitPath(const std::string &path, std::string &dirpath, std::string &filename)
+{
+    size_t filename_idx = path.find_last_of('/');
+    if (filename_idx != std::string::npos)
+    {
+        dirpath = path.substr(0, filename_idx);
+        filename = path.substr(filename_idx + 1);
+    }
+    else
+    {
+        dirpath = "";
+        filename = path;
+    }
+}
+
+int listDir(const std::string &dirpath, std::vector<std::string> *files, std::vector<std::string> *directories)
+{
+    DIR *dp;
+    if ((dp = opendir(dirpath.c_str())) == NULL)
+    {
+        fprintf(stderr, "listDir(%s) - error in opendir: %m\n",
+                dirpath.c_str());
+        return -1;
+    }
+
+    std::string filepath;
+    struct dirent *entry;
+    struct stat statbuf;
+    while ((entry = readdir(dp)) != NULL)
+    {
+        if (*dirpath.rbegin() == '/')
+            filepath = dirpath + entry->d_name;
+        else
+            filepath = dirpath + "/" + entry->d_name;
+        stat(filepath.c_str(), &statbuf);
+        if (S_ISDIR(statbuf.st_mode))
+        {
+            if (!strcmp("..", entry->d_name) || !strcmp(".", entry->d_name))
+            {
+                continue;
+            }
+            if (directories != NULL)
+            {
+                directories->push_back(entry->d_name);
+            }
+        }
+        else
+        {
+            if (files != NULL)
+            {
+                files->push_back(entry->d_name);
+            }
+        }
+    }
+    if (closedir(dp) == -1)
+    {
+        fprintf(stderr, "listDir(%s) - error in closedir: %m\n", dirpath.c_str());
+    }
+    return 0;
+}
+
+static const uint8_t iso8859_2_unused_utf8[10][2] = {
+    {0xc2,0x8a},{0xc2,0x8c},{0xc2,0x8d},{0xc2,0x8e},{0xc2,0x8f},
+    {0xc2,0x9a},{0xc2,0x9c},{0xc2,0x9d},{0xc2,0x9e},{0xc2,0x9f}};
+
+
+#ifndef NO_UCHARDET
+int detectEncoding(const std::string &content, std::string &encoding)
+{
+    uchardet_t handle = uchardet_new();
+    int retval = uchardet_handle_data(handle, content.c_str(), content.length());
+    if (retval != 0)
+    {
+        fprintf(stderr, "uchardet error: handle data error.\n");
+        return 1;
+    }
+    uchardet_data_end(handle);
+    encoding = (uchardet_get_charset(handle));
+    uchardet_delete(handle);
+    return 0;
+}
+#endif
+
+#ifndef NO_PYTHON
+int convertToUTF8(const std::string &input_string, const std::string &input_encoding, std::string &output_string)
+{
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    PyObject *py_string, *py_unicode;
+    py_string = PyString_FromStringAndSize(input_string.c_str(), input_string.length());
+    if (py_string == NULL)
+    {
+        PyErr_Print();
+        PyGILState_Release(gstate);
+        return 1;
+    }
+    py_unicode = PyString_AsDecodedObject(py_string, input_encoding.c_str(), "strict");
+    if (py_unicode == NULL)
+    {
+        Py_DECREF(py_string);
+        PyErr_Print();
+        PyGILState_Release(gstate);
+        return 1;
+    }
+    Py_DECREF(py_string);
+    py_string = PyUnicode_AsUTF8String(py_unicode);
+    if (py_string == NULL)
+    {
+        Py_DECREF(py_unicode);
+        PyErr_Print();
+        PyGILState_Release(gstate);
+        return 1;
+    }
+    Py_DECREF(py_unicode);
+    output_string = PyString_AsString(py_string);
+    Py_DECREF(py_string);
+    PyGILState_Release(gstate);
+    return 0;
+}
+
+int convertToUTF8(const std::string &input_string, std::string &output_string)
+{
+    std::string input_encoding;
+    if (detectEncoding(input_string, input_encoding) != 0)
+    {
+        fprintf(stderr, "convertToUTF8 - cannot detect encoding\n");
+        return -1;
+    }
+    fprintf(stderr, "convertToUTF8 - detected input encoding: %s\n", input_encoding.c_str());
+    if (convertToUTF8(input_string, input_encoding, output_string) != 0)
+    {
+        fprintf(stderr, "convertToUTF8 - cannot convert to utf-8");
+        return -1;
+    }
+    // workaround when uchardet detects wrongly ISO-8859-2 instead
+    // of WINDOWS-1250
+    if (input_encoding == "ISO-8859-2")
+    {
+        bool decode_again = false;
+        for (int i = 0; i < 10; i++)
+        {
+            fprintf(stderr, "convertToUTF8 - looking for %#x,%#x: ", iso8859_2_unused_utf8[i][0], iso8859_2_unused_utf8[i][1]);
+            void *ptr = memmem(output_string.c_str(), output_string.length(), iso8859_2_unused_utf8[i], 2);
+            if (ptr != NULL)
+            {
+                fprintf(stderr, "found\n");
+                decode_again = true;
+                break;
+            }
+            printf("not found\n");
+        }
+        if (decode_again)
+        {
+            fprintf(stderr, "convertToUTF8 - ISO-8859-2 is not right encoding, trying WINDOWS-1250\n");
+            if (0 != convertToUTF8(input_string, "WINDOWS-1250", output_string))
+            {
+                fprintf(stderr, "convertToUTF8 - cannot convert to utf-8");
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+#endif
+
+static int unquotePlus(char* out, const char* in);
+
+HeaderMap getHeaders(const std::string& url)
+{
+    std::map<std::string, std::string> headers;
+    // Support both '|' (Kodi/IPTV plugin convention) and '#' as header separator, including URL-encoded versions
+    size_t pos = url.find('|');
+    size_t sep_len = 1;
+    if (pos == std::string::npos) {
+        pos = url.find("%7c");
+        if (pos != std::string::npos) sep_len = 3;
+    }
+    if (pos == std::string::npos) {
+        pos = url.find("%7C");
+        if (pos != std::string::npos) sep_len = 3;
+    }
+    if (pos == std::string::npos) {
+        pos = url.find('#');
+        if (pos != std::string::npos) sep_len = 1;
+    }
+    if (pos == std::string::npos) {
+        pos = url.find("%23");
+        if (pos != std::string::npos) sep_len = 3;
+    }
+
+    if (pos != std::string::npos && (url.compare(0, 4, "http") == 0 || url.compare(0, 4, "rtsp") == 0))
+    {
+        SALOG("getHeaders: separator at pos %zu in URL: %.100s", pos, url.c_str());
+        std::string headers_str = url.substr(pos + sep_len);
+        char *headers_cstr = (char*) malloc ((url.length() + 1) * sizeof(char));
+        if (!unquotePlus(headers_cstr, headers_str.c_str()))
+        {
+            headers_str = headers_cstr;
+        }
+        else
+        {
+            fprintf(stderr, "getHeaders - cannot unquote headers string\n");
+        }
+        free(headers_cstr);
+
+        pos = 0;
+        while (pos != std::string::npos)
+        {
+            std::string name, value;
+            size_t start = pos;
+            size_t len = std::string::npos;
+            pos = headers_str.find('=', pos);
+            if (pos != std::string::npos)
+            {
+                len = pos - start;
+                pos++;
+                name = headers_str.substr(start, len);
+                start = pos;
+                len = std::string::npos;
+                pos = headers_str.find('&', pos);
+                if (pos != std::string::npos)
+                {
+                    len = pos - start;
+                    pos++;
+                }
+                value = headers_str.substr(start, len);
+            }
+            if (!name.empty() && !value.empty())
+            {
+                SALOG("getHeaders: header '%s' = '%s'", name.c_str(), value.c_str());
+                headers[name] = value;
+            }
+        }
+    }
+    SALOG("getHeaders: %zu header(s) extracted", headers.size());
+    return headers;
+}
+
+// http://stackoverflow.com/questions/2673207/c-c-url-decode-library
+static int unquotePlus(char* out, const char* in)
+{
+    static const signed char tbl[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+         0, 1, 2, 3, 4, 5, 6, 7,  8, 9,-1,-1,-1,-1,-1,-1,
+        -1,10,11,12,13,14,15,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,10,11,12,13,14,15,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1, -1,-1,-1,-1,-1,-1,-1,-1
+    };
+    char c, v1, v2;
+    char *beg = out;
+    if(in != NULL) {
+        while((c=*in++) != '\0') {
+            if(c == '+')
+            {
+                *out++ = ' ';
+                continue;
+            }
+            if(c == '%') {
+                if(!(v1=*in++) || (v1=tbl[(unsigned char)v1])<0 ||
+                   !(v2=*in++) || (v2=tbl[(unsigned char)v2])<0) {
+                    *beg = '\0';
+                    return -1;
+                }
+                c = (v1<<4)|v2;
+            }
+            *out++ = c;
+        }
+    }
+    *out = '\0';
+    return 0;
+}
+
