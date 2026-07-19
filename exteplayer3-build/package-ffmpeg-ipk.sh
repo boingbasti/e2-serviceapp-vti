@@ -49,6 +49,7 @@ Architecture: ${ARCH}
 OE: ffmpeg
 Homepage: https://www.ffmpeg.org/
 Depends: libc6 (>= 2.20), exteplayer3 (= 1:181+git3)
+Source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
 EOF
 
 echo "2.0" > "${PKGDIR}/debian-binary"

@@ -83,8 +83,14 @@ static int ManagerAdd(Context_t  *context, Track_t track) {
     int i = 0;
     for (i = 0; i < TRACKWRAP; i++) 
     {
-        if (Tracks[i].Id == track.Id) 
+        if (Tracks[i].Id == track.Id)
         {
+            /* Siehe video.c: AVIdx muss bei Kontext-Wechsel aktualisiert
+             * werden, sonst werden Pakete des neuen Kontexts stillschweigend
+             * verworfen.
+             */
+            freeTrack(&Tracks[i]);
+            copyTrack(&Tracks[i], &track);
             Tracks[i].pending = 0;
             return cERR_AUDIO_MGR_NO_ERROR;
         }

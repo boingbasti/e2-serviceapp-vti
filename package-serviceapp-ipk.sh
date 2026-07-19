@@ -50,8 +50,10 @@ Section: base
 Priority: optional
 Maintainer: saufsoldat
 License: GPL-2.0
+Homepage: https://github.com/boingbasti/e2-serviceapp-vti
 Architecture: ${ARCH}
 Depends: gstplayer, libgcc1 (>= 4.9.2), libssl1.0.0 (>= 1.0.2a), libstdc++6 (>= 4.9.2), enigma2, openssl, libcrypto1.0.0 (>= 1.0.2a), exteplayer3, libc6 (>= 2.20), uchardet (>= 0.0.6)
+Source: git://github.com/mx3L/serviceapp.git;branch=master;protocol=https
 EOF
 
 cat > "${PKGDIR}/ctrl_root/postinst" << EOF

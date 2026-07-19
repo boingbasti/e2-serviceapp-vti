@@ -97,6 +97,12 @@ static int ManagerAdd(Context_t *context, Track_t track)
     {
         if (Tracks[i].Id == track.Id)
         {
+            /* Siehe video.c: AVIdx muss bei Kontext-Wechsel aktualisiert
+             * werden, sonst werden Pakete des neuen Kontexts stillschweigend
+             * verworfen.
+             */
+            freeTrack(&Tracks[i]);
+            copyTrack(&Tracks[i], &track);
             Tracks[i].pending = 0;
             return cERR_SUBTITLE_MGR_NO_ERROR;
         }

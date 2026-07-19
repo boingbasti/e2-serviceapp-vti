@@ -112,14 +112,15 @@ chmod 755 "${BUILDDIR}/repack/data_root/usr/lib/exteplayer3_deps"/lib*.so*
 cat > "${BUILDDIR}/repack/ctrl_root/control" << EOF
 Package: exteplayer3
 Version: 1:181+git3
-Description: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master with 3 additional post-181 commits. Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/. Compiled with glibc 2.20 compatibility for VTi MIPS images.
+Description: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master with 3 additional post-181 commits. Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/.
 Section: libs
 Priority: optional
 Maintainer: saufsoldat
 License: GPL-2.0
+Homepage: https://github.com/boingbasti/e2-serviceapp-vti
 Architecture: mips32el
 OE: exteplayer3
-Depends: libc6 (>= 2.20), enigma2-plugin-systemplugins-serviceapp
+Depends: libc6 (>= 2.20)
 Source: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https
 EOF
 

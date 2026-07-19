@@ -83,7 +83,7 @@ mkdir -p repack/data_root/usr/bin
 mkdir -p repack/ctrl_root
 # Setup control template if missing
 if [ ! -f repack/ctrl_root/control ]; then
-  echo -e "Package: exteplayer3\nVersion: 1:181+git3\nDescription: exteplayer3 with HLS improvements\nSection: base\nPriority: optional\nMaintainer: saufsoldat\nLicense: GPL-2.0\nArchitecture: armv7ahf-vfp-neon\nDepends: libc6" > repack/ctrl_root/control
+  echo -e "Package: exteplayer3\nVersion: 1:181+git3\nDescription: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master with 3 additional post-181 commits. Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/.\nSection: libs\nPriority: optional\nMaintainer: saufsoldat\nLicense: GPL-2.0\nHomepage: https://github.com/boingbasti/e2-serviceapp-vti\nArchitecture: armv7ahf-vfp-neon\nOE: exteplayer3\nDepends: libc6 (>= 2.20)\nSource: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https" > repack/ctrl_root/control
 fi
 if [ ! -f repack/debian-binary ]; then
   echo "2.0" > repack/debian-binary

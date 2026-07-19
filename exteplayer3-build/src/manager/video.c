@@ -81,8 +81,16 @@ static int ManagerAdd(Context_t  *context, Track_t track) {
     int i;
     for (i = 0; i < TRACKWRAP; i++) 
     {
-        if (Tracks[i].Id == track.Id) 
+        if (Tracks[i].Id == track.Id)
         {
+            /* Dieselbe PID kann bei nahtlosen HLS-Kontextwechseln unter einem
+             * neuen AVIdx erneut angemeldet werden. Ohne Aktualisierung blieb
+             * AVIdx fuer immer auf dem alten Kontext stehen, wodurch
+             * container_ffmpeg.c neue Pakete stillschweigend verwarf
+             * (videoTrack->AVIdx == cAVIdx schlug dauerhaft fehl).
+             */
+            freeTrack(&Tracks[i]);
+            copyTrack(&Tracks[i], &track);
             Tracks[i].pending = 0;
             return cERR_VIDEO_MGR_NO_ERROR;
         }
