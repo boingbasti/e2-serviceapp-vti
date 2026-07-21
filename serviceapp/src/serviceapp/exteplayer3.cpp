@@ -49,7 +49,15 @@ std::vector<std::string> ExtEplayer3::buildCommand()
 		args.push_back(headersStr);
 	}
 	if (mPlayerOptions.aacSwDecoding)
+	{
+		/* -a erwartet zwingend einen numerischen Wert (getopt-Optstring "a:").
+		 * Ohne Wert frisst getopt das naechste argv-Element (z.B. "-d") als
+		 * optarg fuer -a, wodurch dieses Flag nie als eigenes Flag ankommt.
+		 * 3 = Bit 0 (AAC) + Bit 1 (AAC_LATM), beide Software-Decoder-Pfade an.
+		 */
 		args.push_back("-a");
+		args.push_back("3");
+	}
 	if (mPlayerOptions.dtsSwDecoding)
 		args.push_back("-d");
 	if (mPlayerOptions.wmaSwDecoding)

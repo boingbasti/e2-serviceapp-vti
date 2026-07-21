@@ -98,8 +98,8 @@ typedef enum {RTMP_NATIVE, RTMP_LIBRTMP, RTMP_NONE} eRTMPProtoImplType;
 /* Varaibles                     */
 /* ***************************** */
 
-static pthread_rwlock_t mutex;
-static pthread_mutex_t seek_mutex;
+static pthread_rwlock_t mutex = PTHREAD_RWLOCK_INITIALIZER;
+static pthread_mutex_t seek_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_t PlayThread;
 static int32_t hasPlayThreadStarted = 0;
@@ -144,13 +144,6 @@ void progressive_playback_set(int32_t val)
 static void getMutex_uni(int type, const char *filename __attribute__((unused)), const char *function __attribute__((unused)), int32_t line)
 {
     ffmpeg_printf(100, "::%d requesting mutex\n", line);
-    static bool mutexInitialized = false;
-
-    if (!mutexInitialized)
-    {
-        pthread_rwlock_init(&mutex, NULL);
-        mutexInitialized = true;
-    }
 
     if(type == 0)
     {
@@ -173,17 +166,6 @@ static void releaseMutex(const char *filename __attribute__((unused)), const con
 
 static void getSeekMutex()
 {
-    static bool mutexInitialized = false;
-    /* This is not perfect solution because 
-     * there could be race conditions and theoretically pthread_mutex_init
-     * could be called twice, but anyway
-     */
-    if (!mutexInitialized)
-    {
-        pthread_mutex_init(&seek_mutex, NULL);
-        mutexInitialized = true;
-    }
-
     pthread_mutex_lock(&seek_mutex);
 }
 
@@ -757,6 +739,12 @@ static void FFMPEGThread(Context_t *context)
                         {
                             seek_target_seconds += avContextTab[i]->start_time;
                         }
+                        /* Ein Seek kann den Stream von einem bereits erreichten EOF
+                         * wegbewegen (z.B. zurueckspringen nach Vorspulen ans Ende) -
+                         * ohne diesen Reset wuerde der naechste, an sich harmlose
+                         * Lesefehler an der neuen Position faelschlich sofortiges
+                         * Schliessen statt der Netzwerk-Gnadenfrist ausloesen. */
+                        isEOFReached[i] = 0;
                         //av_seek_frame(avContextTab[i], -1, seek_target_seconds, 0);
                         avformat_seek_file(avContextTab[i], -1, INT64_MIN, seek_target_seconds, INT64_MAX, 0);
                     }
@@ -1648,231 +1636,6 @@ AVIOContext* container_ffmpeg_get_avio_context(CustomIOCtx_t *custom_io, size_t 
 }
 #endif
 
-#define HLS_MAX_FIELD_LEN 64
-#define HLS_MAX_URL_SIZE 4096
-
-typedef struct {
-    AVIOContext pub;
-    int (*short_seek_get)(void *opaque);
-    int short_seek_threshold;
-    int current_type;
-    int64_t last_time;
-    int64_t maxsize;
-    int64_t bytes_read;
-    int64_t bytes_written;
-    int seek_count;
-    int writeout_count;
-    int orig_buffer_size;
-    int64_t written_output_size;
-} hls_ffiocontext_local;
-
-struct hls_playlist_local {
-    char url[HLS_MAX_URL_SIZE];
-    hls_ffiocontext_local pb;
-    uint8_t* read_buffer;
-    AVIOContext *input;
-    int input_read_done;
-    AVIOContext *input_next;
-    int input_next_requested;
-    AVFormatContext *parent;
-    int index;
-    AVFormatContext *ctx;
-    AVPacket *pkt;
-    int has_noheader_flag;
-
-    AVStream **main_streams;
-    int n_main_streams;
-
-    int finished;
-    int type;
-    int64_t target_duration;
-    int64_t start_seq_no;
-    int time_offset_flag;
-    int64_t start_time_offset;
-    int n_segments;
-    void *segments;
-    int needed;
-    int broken;
-    int64_t cur_seq_no;
-    int64_t last_seq_no;
-    int m3u8_hold_counters;
-    int64_t cur_seg_offset;
-    int64_t last_load_time;
-};
-
-struct hls_rendition_local {
-    enum AVMediaType type;
-    struct hls_playlist_local *playlist;
-    char group_id[HLS_MAX_FIELD_LEN];
-    char language[HLS_MAX_FIELD_LEN];
-    char name[HLS_MAX_FIELD_LEN];
-    int disposition;
-};
-
-struct hls_variant_local {
-    int bandwidth;
-    int n_playlists;
-    struct hls_playlist_local **playlists;
-    char audio_group[HLS_MAX_FIELD_LEN];
-    char video_group[HLS_MAX_FIELD_LEN];
-    char subtitles_group[HLS_MAX_FIELD_LEN];
-};
-
-struct hls_context_local {
-    void *class;
-    AVFormatContext *ctx;
-    int n_variants;
-    struct hls_variant_local **variants;
-    int n_playlists;
-    struct hls_playlist_local **playlists;
-    int n_renditions;
-    struct hls_rendition_local **renditions;
-};
-
-static void container_ffmpeg_preselect_hls_streams(AVFormatContext *avContext)
-{
-    if (avContext->nb_programs <= 0)
-        return;
-
-    if (!avContext->iformat || strcmp(avContext->iformat->name, "hls") != 0)
-        return;
-
-    struct hls_context_local *c = (struct hls_context_local *)avContext->priv_data;
-    if (c == NULL || c->n_playlists <= 0 || c->n_variants <= 0)
-        return;
-
-    RAW_DEBUG_LOG("[HLS preselect] struct size: %zu, offset needed: %zu, broken: %zu\n",
-            sizeof(struct hls_playlist_local),
-            (size_t)((char*)&c->playlists[0]->needed - (char*)c->playlists[0]),
-            (size_t)((char*)&c->playlists[0]->broken - (char*)c->playlists[0]));
-    fflush(stderr);
-
-    int best_variant_idx = 0;
-
-    if (g_sel_program_id <= 0 && g_hls_quality_mode != 0)
-    {
-        int64_t best_bandwidth = -1;
-        int i;
-        for (i = 0; i < c->n_variants; i++)
-        {
-            struct hls_variant_local *v = c->variants[i];
-            int64_t bandwidth = v->bandwidth;
-
-            if (best_bandwidth == -1 ||
-                (g_hls_quality_mode == 2 && bandwidth > best_bandwidth) ||
-                (g_hls_quality_mode == 1 && bandwidth < best_bandwidth))
-            {
-                best_variant_idx = i;
-                best_bandwidth = bandwidth;
-            }
-        }
-        RAW_DEBUG_LOG("[HLS preselect] selected variant index %d (quality_mode=%d, bandwidth=%"PRId64")\n",
-                      best_variant_idx, g_hls_quality_mode, best_bandwidth);
-    }
-    else if (g_sel_program_id > 0)
-    {
-        int i;
-        for (i = 0; i < c->n_variants; i++)
-        {
-            /* Check if the program ID matches (variant index matches program index in HLS demuxer) */
-            AVProgram *p = avContext->programs[i];
-            if (p->id == g_sel_program_id)
-            {
-                best_variant_idx = i;
-                break;
-            }
-        }
-        RAW_DEBUG_LOG("[HLS preselect] selected variant index %d by program ID %d\n",
-                      best_variant_idx, g_sel_program_id);
-    }
-
-    /* Initialize all playlists to NOT needed and broken, except the selected ones */
-    int i;
-    for (i = 0; i < c->n_playlists; i++) {
-        c->playlists[i]->needed = 0;
-        c->playlists[i]->broken = 1;
-    }
-
-    struct hls_variant_local *best_var = c->variants[best_variant_idx];
-    if (best_var->n_playlists > 0 && best_var->playlists[0] != NULL) {
-        best_var->playlists[0]->needed = 1;
-        best_var->playlists[0]->broken = 0;
-        RAW_DEBUG_LOG("[HLS preselect] keeping video variant playlist %s\n", best_var->playlists[0]->url);
-    }
-
-    /* Process audio renditions */
-    int best_audio_pls_count = 0;
-    struct hls_playlist_local *audio_playlists[128];
-    int audio_is_default[128];
-    int has_any_default_audio = 0;
-
-    for (i = 0; i < c->n_renditions; i++) {
-        struct hls_rendition_local *rend = c->renditions[i];
-        if (rend->type == AVMEDIA_TYPE_AUDIO && strcmp(rend->group_id, best_var->audio_group) == 0) {
-            if (rend->playlist != NULL && best_audio_pls_count < 128) {
-                audio_playlists[best_audio_pls_count] = rend->playlist;
-                audio_is_default[best_audio_pls_count] = (rend->disposition & AV_DISPOSITION_DEFAULT) ? 1 : 0;
-                if (audio_is_default[best_audio_pls_count]) {
-                    has_any_default_audio = 1;
-                }
-                best_audio_pls_count++;
-            }
-        }
-    }
-
-    for (i = 0; i < best_audio_pls_count; i++) {
-        int keep = 0;
-        if (g_hls_audio_default_only) {
-            if (audio_is_default[i] || !has_any_default_audio) {
-                keep = 1;
-            }
-        } else {
-            keep = 1;
-        }
-
-        if (keep) {
-            audio_playlists[i]->needed = 1;
-            audio_playlists[i]->broken = 0;
-            RAW_DEBUG_LOG("[HLS preselect] keeping audio rendition playlist %s (default=%d)\n",
-                          audio_playlists[i]->url, audio_is_default[i]);
-        }
-    }
-
-    /* Process subtitle renditions */
-    for (i = 0; i < c->n_renditions; i++) {
-        struct hls_rendition_local *rend = c->renditions[i];
-        if (rend->type == AVMEDIA_TYPE_SUBTITLE && strcmp(rend->group_id, best_var->subtitles_group) == 0) {
-            if (rend->playlist != NULL) {
-                rend->playlist->needed = 1;
-                rend->playlist->broken = 0;
-                RAW_DEBUG_LOG("[HLS preselect] keeping subtitle rendition playlist %s\n", rend->playlist->url);
-            }
-        }
-    }
-
-    /* Mark non-selected programs as discarded */
-    for (i = 0; i < avContext->nb_programs; i++) {
-        if (i != best_variant_idx) {
-            avContext->programs[i]->discard = AVDISCARD_ALL;
-        } else {
-            avContext->programs[i]->discard = AVDISCARD_DEFAULT;
-        }
-    }
-
-    /* Set stream->discard = AVDISCARD_ALL for streams of not needed/broken playlists */
-    for (i = 0; i < c->n_playlists; i++) {
-        struct hls_playlist_local *pls = c->playlists[i];
-        if (!pls->needed || pls->broken) {
-            int s_idx;
-            for (s_idx = 0; s_idx < pls->n_main_streams; s_idx++) {
-                if (pls->main_streams[s_idx]) {
-                    pls->main_streams[s_idx]->discard = AVDISCARD_ALL;
-                }
-            }
-        }
-    }
-}
-
 int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uint64_t fileSize, char *moovAtomFile, uint64_t moovAtomOffset, int32_t AVIdx)
 {
     int32_t err = 0;
@@ -2194,12 +1957,6 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
     avContextTab[AVIdx]->flags = AVFMT_FLAG_GENPTS;
 
     /* Preselection is now handled natively in FFmpeg's hls.c using dictionary options */
-    /*
-    if (AVIdx == 0)
-    {
-        container_ffmpeg_preselect_hls_streams(avContextTab[AVIdx]);
-    }
-    */
 
     if (context->playback->noprobe)
     {

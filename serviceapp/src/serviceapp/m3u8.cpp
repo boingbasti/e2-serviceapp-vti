@@ -135,6 +135,13 @@ std::string M3U8VariantsExplorer::resolveUrl(const std::string& base, const std:
 {
     if (ref.substr(0, 4) == "http")
         return ref;
+    // Protokoll-relative URL (//host/path, gueltiger RFC-3986-Referenztyp):
+    // Schema von base uebernehmen, Rest (Host+Pfad) kommt bereits aus ref.
+    if (ref.substr(0, 2) == "//")
+    {
+        Url purl(base);
+        return purl.proto() + ":" + ref;
+    }
     // Absoluter Pfad: nur Origin (scheme://host) voranstellen
     if (!ref.empty() && ref[0] == '/')
     {

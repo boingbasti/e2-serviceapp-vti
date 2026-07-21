@@ -32,8 +32,9 @@ struct eServiceAppOptions
 	{};
 };
 
-class eServiceApp: public iPlayableService, public iPauseableService, public iSeekableService, 
-	public iAudioChannelSelection, public iAudioTrackSelection,  public iSubtitleOutput, public iSubserviceList, public iServiceInformation
+class eServiceApp: public iPlayableService, public iPauseableService, public iServiceInformation,
+	public iSeekableService, public iAudioTrackSelection, public iAudioChannelSelection,
+	public iSubtitleOutput, public iSubserviceList
 {
 	DECLARE_REF(eServiceApp);
 

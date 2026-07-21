@@ -99,6 +99,11 @@ chmod 755 "${BUILDDIR}/repack/data_root/usr/bin/exteplayer3"
 # Kopiere MIPS FFmpeg Bibliotheken
 cp -d "${FFMPEG_LIBS}"/lib*.so* "${BUILDDIR}/repack/data_root/usr/lib/exteplayer3_deps/"
 rm -f "${BUILDDIR}/repack/data_root/usr/lib/exteplayer3_deps"/libz.so*
+
+# libavformat (MIPS) braucht libatomic.so.1 zur Laufzeit (mips32el hat keine
+# nativen Atomic-Instruktionen). Kommt ueber die Depends-Zeile unten aus dem
+# VTi-Feed-Paket "libatomic1" (gehoert zum gcc-runtime, ist dort vorhanden),
+# wird NICHT mitgepackt - fuer Shared Libs ist genau dafuer der Feed da.
 for lib in "${BUILDDIR}/repack/data_root/usr/lib/exteplayer3_deps"/lib*.so*; do
     if [ -f "$lib" ] && [ ! -L "$lib" ]; then
         python3 -c "with open('$lib', 'r+b') as f: f.seek(8); f.write(b'\x00')"
@@ -120,7 +125,7 @@ License: GPL-2.0
 Homepage: https://github.com/boingbasti/e2-serviceapp-vti
 Architecture: mips32el
 OE: exteplayer3
-Depends: libc6 (>= 2.20)
+Depends: libc6 (>= 2.20), libatomic1
 Source: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https
 EOF
 

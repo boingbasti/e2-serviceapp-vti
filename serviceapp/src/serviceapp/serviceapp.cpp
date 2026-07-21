@@ -428,8 +428,17 @@ void eServiceApp::fillSubservices()
 				// will also remove name for subservice service, see playSubservice.
 				// eServiceReferenceDVB hat ein 'flags2'-Feld das eServiceReference
 				// nicht besitzt — der Cast würde 4 Bytes hinter ref schreiben
-				// und den Stack korrumpieren. Für ExtEplayer3-Streams (type 5002)
-				// ist ParentTransportStreamID nicht benötigt.
+				// und den Stack korrumpieren (Commit 4d3391f, echter Absturz).
+				//
+				// Bewusster, noch nicht behobener Funktionsverzicht: Der Fix hat
+				// das Setzen von ParentServiceID/ParentTransportStreamID komplett
+				// entfernt statt es sicher (z.B. über ein eigenes, richtig
+				// dimensioniertes eServiceReferenceDVB-Objekt statt eines Casts
+				// auf ref) wiederherzustellen. Laut Kommentar oben heisst das:
+				// HLS-Subservices (Bitraten-Varianten) lassen sich seitdem nur
+				// noch quickzappen, nicht mehr dauerhaft als eigener Favorit/
+				// Bouquet-Eintrag speichern. Quickzap selbst ist unveraendert
+				// funktionsfaehig. TODO: bei Gelegenheit sicher wiederherstellen.
 				char bitrate_buf2[32];
 				snprintf(bitrate_buf2, sizeof(bitrate_buf2), "%lu", it->bitrate);
 				ref.name = original_title + ": " + bitrate_buf2 + "b/s";

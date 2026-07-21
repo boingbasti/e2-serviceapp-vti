@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* fuer PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP */
 /*
  * audio manager handling.
  *
@@ -23,6 +24,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include <libavformat/avformat.h>
 #include "manager.h"
@@ -52,6 +54,11 @@ static Track_t * Tracks = NULL;
 static int TrackCount = 0;
 static int CurrentTrack = 0; //TRACK[0] as default.
 
+/* Statisch initialisiert (nicht per if(!initialized)-Lazy-Init) - sonst
+ * koennten zwei Threads beim allerersten Aufruf gleichzeitig pthread_mutex_init()
+ * auf demselben Mutex ausfuehren (undefiniertes Verhalten). */
+static pthread_mutex_t track_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
 /* ***************************** */
 /* Prototypes                    */
 /* ***************************** */
@@ -59,6 +66,21 @@ static int CurrentTrack = 0; //TRACK[0] as default.
 /* ***************************** */
 /* Functions                     */
 /* ***************************** */
+
+/* Schuetzt Tracks[]/TrackCount/CurrentTrack vor gleichzeitigem Zugriff durch
+ * den Play-Thread (ManagerAdd bei HLS-Kontextwechsel) und den stdin-Kommando-
+ * Thread (TermThreadFun, z.B. Tracklisten-Abfrage/Tonspurwechsel). Rekursiv,
+ * da MANAGER_LIST intern erneut in Command() (MANAGER_ADD) hineinruft.
+ */
+static void getTrackMutex(void)
+{
+    pthread_mutex_lock(&track_mutex);
+}
+
+static void releaseTrackMutex(void)
+{
+    pthread_mutex_unlock(&track_mutex);
+}
 
 static int ManagerAdd(Context_t  *context, Track_t track) {
 
@@ -189,9 +211,11 @@ static int Command(void  *_context, ManagerCmd_t command, void * argument)
 
     audio_mgr_printf(10, "%s::%s\n", FILENAME, __FUNCTION__);
 
-    switch(command) 
+    getTrackMutex();
+
+    switch(command)
     {
-    case MANAGER_ADD: 
+    case MANAGER_ADD:
     {
         Track_t * track = argument;
         ret = ManagerAdd(context, *track);
@@ -199,7 +223,16 @@ static int Command(void  *_context, ManagerCmd_t command, void * argument)
     }
     case MANAGER_LIST:
     {
+        /* container_ffmpeg_update_tracks() holt selbst den Container-rwlock
+         * im Write-Modus (getMutex_wr) und ruft darin ManagerAdd() auf. Der
+         * Play-Thread haelt beim Paket-Verarbeiten denselben rwlock im Read-
+         * Modus und will dabei track_mutex (ueber diese Command()-Funktion).
+         * track_mutex hier zu halten wuerde daher zu einer AB-BA-Verklemmung
+         * mit dem rwlock fuehren - deshalb kurz freigeben, ManagerAdd() ist
+         * durch den erneuten Command()-Einstieg trotzdem geschuetzt. */
+        releaseTrackMutex();
         container_ffmpeg_update_tracks(context, context->playback->uri, 0);
+        getTrackMutex();
         *((TrackDescription_t **)argument) = ManagerList(context);
         break;
     }
@@ -328,6 +361,8 @@ static int Command(void  *_context, ManagerCmd_t command, void * argument)
     }
 
     audio_mgr_printf(10, "%s:%s: returning %d\n", FILENAME, __FUNCTION__,ret);
+
+    releaseTrackMutex();
 
     return ret;
 }

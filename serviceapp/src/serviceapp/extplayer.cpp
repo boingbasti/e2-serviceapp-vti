@@ -373,6 +373,18 @@ int PlayerBackend::audioSelectTrack(int trackNum)
 	if (trackNum >= 0 && trackNum < (int) mAudioStreams.size())
 	{
 		pPlayer->sendAudioSelectTrack(mAudioStreams[trackNum].id);
+		/* Optimistisch sofort setzen statt nur auf die asynchrone "a_s"-
+		 * Bestaetigung zu warten - sonst zeigt die GUI beim direkt danach
+		 * folgenden getCurrentTrack() noch die alte Spur an (Bestaetigung
+		 * kommt erst in der naechsten eMainloop-Iteration ueber die Pipe
+		 * zurueck). recvAudioTrackSelected() setzt denselben Wert spaeter
+		 * redundant nochmal - dient als Selbstkorrektur bei Abweichung. */
+		if (pCurrentAudio != NULL)
+		{
+			delete pCurrentAudio;
+			pCurrentAudio = NULL;
+		}
+		pCurrentAudio = new audioStream(mAudioStreams[trackNum]);
 		return 0;
 	}
 	return -1;
@@ -411,14 +423,27 @@ int PlayerBackend::subtitleGetCurrentTrackNum()
 
 int PlayerBackend::subtitleSelectTrack(int trackNum)
 {
+	/* Optimistisch sofort setzen statt nur auf die asynchrone Bestaetigung
+	 * zu warten, siehe audioSelectTrack() fuer die ausfuehrliche Begruendung. */
 	if (trackNum == -1)
 	{
 		pPlayer->sendSubtitleSelectTrack(-1);
+		if (pCurrentSubtitle != NULL)
+		{
+			delete pCurrentSubtitle;
+			pCurrentSubtitle = NULL;
+		}
 		return 0;
 	}
 	if (trackNum >= 0 && trackNum < (int) mSubtitleStreams.size())
 	{
 		pPlayer->sendSubtitleSelectTrack(mSubtitleStreams[trackNum].id);
+		if (pCurrentSubtitle != NULL)
+		{
+			delete pCurrentSubtitle;
+			pCurrentSubtitle = NULL;
+		}
+		pCurrentSubtitle = new subtitleStream(mSubtitleStreams[trackNum]);
 		return 0;
 	}
 	return -1;
@@ -520,6 +545,13 @@ void PlayerBackend::recvAudioTrackSelected(int status, int trackId)
 			}
 		}
 	}
+	else
+	{
+		/* Wechsel im Backend fehlgeschlagen - die optimistische Annahme aus
+		 * audioSelectTrack() waere sonst dauerhaft falsch. Echten Zustand
+		 * per "ac" nachziehen (kommt ueber recvAudioTrackCurrent() zurueck). */
+		pPlayer->sendUpdateAudioTrackCurrent();
+	}
 }
 
 void PlayerBackend::recvSubtitleTracksList(int status, std::vector<subtitleStream>& streams)
@@ -560,6 +592,12 @@ void PlayerBackend::recvSubtitleTrackSelected(int status, int trackId)
 				break;
 			}
 		}
+	}
+	else
+	{
+		/* Wechsel im Backend fehlgeschlagen - echten Zustand nachziehen,
+		 * siehe recvAudioTrackSelected() fuer die ausfuehrliche Begruendung. */
+		pPlayer->sendUpdateSubtitleTrackCurrent();
 	}
 }
 

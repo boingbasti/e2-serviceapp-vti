@@ -176,7 +176,7 @@ config_serviceapp.exteplayer3["servicemp3"]             = ConfigSubsection()
 config_serviceapp.exteplayer3["serviceexteplayer3"]     = ConfigSubsection()
 for key in config_serviceapp.exteplayer3.keys():
     config_serviceapp.exteplayer3[key].aac_swdecoding   = ConfigBoolean(default = False)
-    config_serviceapp.exteplayer3[key].dts_swdecoding   = ConfigBoolean(default = False)
+    config_serviceapp.exteplayer3[key].dts_swdecoding   = ConfigBoolean(default = True)
     config_serviceapp.exteplayer3[key].wma_swdecoding   = ConfigBoolean(default = False)
     config_serviceapp.exteplayer3[key].lpcm_injecion    = ConfigBoolean(default = False)
     config_serviceapp.exteplayer3[key].downmix          = ConfigBoolean(default = False)

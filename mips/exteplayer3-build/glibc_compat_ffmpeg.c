@@ -126,7 +126,12 @@ int64_t __fixdfdi(double x)
     int shift = exp - 1075; /* 1023 (bias) + 52 (mantissa bits) */
     uint64_t umag;
     if (shift >= 0) {
-        if (shift >= 12)
+        /* Ab shift==11 kann mant<<shift bereits 2^63 erreichen/ueberschreiten -
+         * das kippt den (int64_t)-Cast unten in einen falschen negativen Wert
+         * statt korrekt zu saettigen. Deshalb hier schon abbrechen, nicht erst
+         * bei shift>=12 (die unsigned-Variante darf das, da sie den vollen
+         * 64-Bit-Bereich nutzt statt nur die Haelfte fuer signed). */
+        if (shift >= 11)
             return sign ? INT64_MIN : INT64_MAX;
         umag = mant << shift;
     } else {
@@ -180,7 +185,10 @@ int64_t __fixsfdi(float x)
     int shift = exp - 150; /* 127 (bias) + 23 (mantissa bits) */
     uint64_t umag;
     if (shift >= 0) {
-        if (shift >= 41)
+        /* Analog zu __fixdfdi: ab shift==40 kann m<<shift bereits 2^63
+         * erreichen/ueberschreiten, deshalb hier schon saettigen statt erst
+         * bei shift>=41. */
+        if (shift >= 40)
             return sign ? INT64_MIN : INT64_MAX;
         umag = m << shift;
     } else {
