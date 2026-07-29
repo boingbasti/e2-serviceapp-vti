@@ -68,7 +68,7 @@ echo "=== Konfiguriere FFmpeg ==="
   --enable-postproc \
   --extra-cflags="-O2 -march=armv7-a -mfpu=neon -mfloat-abi=hard -U__USE_TIME_BITS64 -D_TIME_BITS=32 -I${SYSROOT}/usr/include" \
   --extra-ldflags="-L${SYSROOT}/usr/lib/arm -L${SYSROOT}/usr/lib -Wl,-rpath,/usr/lib/exteplayer3_deps ${COMPAT_OBJ}" \
-  --extra-libs="-lssl -lcrypto -ldl -lpthread"
+  --extra-libs="-lssl -lcrypto -ldl -lpthread -lm"
 
 echo "=== Kompiliere FFmpeg ($(nproc) Kerne) ==="
 make -j$(nproc)

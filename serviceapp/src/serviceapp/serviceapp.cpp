@@ -1343,7 +1343,7 @@ int eServiceApp::getInfo(int w)
 {
 	switch (w)
 	{
-	case sServiceref: return m_ref;
+	case sServiceref: return resIsString;
 	case sVideoHeight: return m_height;
 	case sVideoWidth: return m_width;
 	case sFrameRate: return m_framerate;
@@ -1429,7 +1429,7 @@ int eServiceApp::getInfo(int w)
 
 std::string eServiceApp::getInfoString(int w)
 {
-	if ( strstr(m_ref.path.c_str(), "://") )
+	if ( Url(m_ref.path).url().find("://") != std::string::npos )
 	{
 		switch (w)
 		{
@@ -1532,7 +1532,7 @@ RESULT eStaticServiceAppInfo::getEvent(const eServiceReference &ref, ePtr<eServi
 {
 #ifdef HAVE_EPG
 	SALOG("eStaticServiceAppInfo::getEvent - ref=%s data0=%d start_time=%ld", ref.toString().c_str(), ref.getData(0), (long)start_time);
-	if (ref.path.find("://") != std::string::npos)
+	if (Url(ref.path).url().find("://") != std::string::npos)
 	{
 		eServiceReference equivalentref;
 		equivalentref.type = ref.type;

@@ -587,7 +587,7 @@ int LinuxDvbClear(Context_t  *context __attribute__((unused)), char *type)
 
 int LinuxDvbPts(Context_t  *context __attribute__((unused)), unsigned long long int* pts) {
     int32_t ret = cERR_LINUXDVB_ERROR;
-    
+
     linuxdvb_printf(50, "\n");
 
     // GET_PTS is immutable call, so it can be done in parallel to other requests
@@ -600,7 +600,7 @@ int LinuxDvbPts(Context_t  *context __attribute__((unused)), unsigned long long 
         linuxdvb_err("VIDEO_GET_PTS: ERROR %d, %s\n", errno, strerror(errno));
     }
 
-    if (ret != cERR_LINUXDVB_NO_ERROR) 
+    if (ret != cERR_LINUXDVB_NO_ERROR)
     {
         if (audiofd > -1 && !ioctl(audiofd, AUDIO_GET_PTS, (void*)&sCURRENT_PTS))
         {

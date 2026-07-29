@@ -16,6 +16,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 
 - ABI-Kompatibilitätsfixes für VTi-Enigma2 (VTable-Offsets, Event-Enums, glibc-Symbolversionen auf ARM und MIPS)
 - Native HLS-Stream-Vorauswahl im FFmpeg-HLS-Demuxer, um bei Multi-Bitrate-/Multi-Audio-Streams unnötige Sub-Playlist-Downloads zu vermeiden (Details in [docs/hls_preselection_documentation.md](docs/hls_preselection_documentation.md))
+- Robustere Bild/Ton-Synchronisation bei HLS-Streams: Cross-Track-AV-Delta-Cache hält Video und Audio auch nach Segment-/Ad-Splice-Wechseln oder längeren Netzwerk-Unterbrechungen synchron
 - Diverse Absturz- und Speicherleck-Fixes (u. a. Reentrancy-Guard beim Streamwechsel, EPG-Cache-Absturzsicherheit)
 - Optionales Debug-Logging (standardmäßig deaktiviert, um die RAM-Disk `/tmp` nicht vollzuschreiben)
 - Automated Picon Sync für Stream-Bouquet-Einträge ohne eigenes Picon

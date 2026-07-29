@@ -70,20 +70,20 @@ static void flv2mpeg4_context_reset(Flv2Mpeg4Context *context)
     flv2mpeg4_set_frame(context->ctx, 0, 0);
 }
 
-static int flv2mpeg4_write_packet(Context_t *out_ctx, Flv2Mpeg4Context *mpeg4p2_ctx, Track_t *track, int cAVIdx, int64_t *pts_current, int64_t *pts_latest, AVPacket *pkt)
+static int flv2mpeg4_write_packet(Context_t *out_ctx, Flv2Mpeg4Context *mpeg4p2_ctx, Track_t *track, int64_t *pts_current, int64_t *pts_latest, AVPacket *pkt)
 {
     if (!mpeg4p2_ctx->ctx)
     {
         mpeg4p2_ctx->ctx = flv2mpeg4_init_ctx(mpeg4p2_ctx, track->width, track->height, flv2mpeg4_context_write_packet_cb, flv2mpeg4_context_write_extradata_cb);
         flv2mpeg4_prepare_extra_data(mpeg4p2_ctx->ctx);
     }
-    
-    *pts_current = track->pts = calcPts(cAVIdx, track->stream, pkt->pts);
+
+    *pts_current = track->pts = calcPts(track->stream, pkt->pts);
     if ((*pts_current > *pts_latest) && (*pts_current != INVALID_PTS_VALUE))
     {
         *pts_latest = *pts_current;
     }
-    track->dts = calcPts(cAVIdx, track->stream, pkt->dts);
+    track->dts = calcPts(track->stream, pkt->dts);
     
     mpeg4p2_ctx->out_ctx = out_ctx;    
     mpeg4p2_ctx->track = track;

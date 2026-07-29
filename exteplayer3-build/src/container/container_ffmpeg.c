@@ -124,8 +124,8 @@ static void *g_stamp;
 static int32_t container_ffmpeg_seek_bytes(off_t pos);
 static int32_t container_ffmpeg_seek(Context_t *context, int64_t sec, uint8_t absolute);
 static int32_t container_ffmpeg_get_length(Context_t *context, int64_t *length);
-static int64_t calcPts(uint32_t avContextIdx, AVStream *stream, int64_t pts);
-static int64_t doCalcPts(int64_t start_time, const AVRational time_base, int64_t pts);
+static int64_t calcPts(AVStream *stream, int64_t pts);
+static int64_t doCalcPts(const AVRational time_base, int64_t pts);
 void LinuxDvbBuffSetStamp(void *stamp);
 
 /* Progressive playback means that we play local file
@@ -176,13 +176,61 @@ static void releaseSeekMutex()
 
 typedef int32_t (* Write_FN) (void  *, void *);
 
-static int32_t Write(Write_FN WriteFun, void *context, void *privateData, int64_t pts)
+/* Zeitlupen-Milderung (Phase 2): rein additive Drosselung, KEINE Hardware-
+ * Flush/Reset-Kommandos. Diagnose zeigte, dass der Demuxer unter
+ * Netzwerklatenz weit vor der tatsaechlichen Hardware-Decoder-Position
+ * (OUTPUT_PTS) herauslaufen kann (in Tests bis zu 155s), was sich als
+ * "Zeitlupe" aeussert. select()-basierte Drosselung in WriteWithRetry greift
+ * erst sehr spaet, weil der Hardware-Puffer offenbar grosszuegig dimensioniert
+ * ist. Diese Ergaenzung bremst den Demux-Thread proaktiv, wenn der Abstand
+ * zu gross wird. */
+#define HLS_LATENCY_THROTTLE_THRESHOLD_90KHZ   (8 * 90000)  /* 8s Soll/Ist-Differenz */
+#define HLS_LATENCY_THROTTLE_SLEEP_US          20000        /* 20ms pro betroffenem Write() */
+#define HLS_LATENCY_THROTTLE_CHECK_INTERVAL_US 250000       /* PTS-Abfrage hoechstens alle 250ms */
+#define HLS_LATENCY_THROTTLE_MIN_CONSECUTIVE   3            /* Entprellung gegen einzelne Ausreisser */
+
+static int32_t Write(Write_FN WriteFun, void *context_, void *privateData, int64_t pts)
 {
-    /* Because Write is blocking we will release mutex which protect 
+    /* Because Write is blocking we will release mutex which protect
      * avformat structures, during write time
      */
     int32_t ret = 0;
+    Context_t *context = (Context_t *)context_;
     releaseMutex(__FILE__, __FUNCTION__,__LINE__);
+
+    static int64_t lastThrottleCheckUs = 0;
+    static int throttleConsecutiveOver = 0;
+
+    if (pts > 0 && pts != INVALID_PTS_VALUE && context && context->playback &&
+        context->playback->isPlaying && !context->playback->isSeeking &&
+        !context->playback->isPaused && !context->playback->BackWard)
+    {
+        int64_t nowUs = av_gettime();
+        if (nowUs - lastThrottleCheckUs >= HLS_LATENCY_THROTTLE_CHECK_INTERVAL_US)
+        {
+            lastThrottleCheckUs = nowUs;
+            unsigned long long int hwPts = 0;
+            if (context->output && context->output->Command &&
+                0 == context->output->Command(context, OUTPUT_PTS, &hwPts) && hwPts > 0)
+            {
+                int64_t diff = pts - (int64_t)hwPts;
+                if (diff > HLS_LATENCY_THROTTLE_THRESHOLD_90KHZ)
+                {
+                    throttleConsecutiveOver++;
+                }
+                else
+                {
+                    throttleConsecutiveOver = 0;
+                }
+
+                if (throttleConsecutiveOver >= HLS_LATENCY_THROTTLE_MIN_CONSECUTIVE)
+                {
+                    usleep(HLS_LATENCY_THROTTLE_SLEEP_US);
+                }
+            }
+        }
+    }
+
     ret = WriteFun(context, privateData);
     getMutex(__FILE__, __FUNCTION__,__LINE__);
     return ret;
@@ -523,16 +571,24 @@ static char* Codec2Encoding(int32_t codec_id, int32_t media_type, uint8_t *extra
     return NULL;
 }
 
-static int64_t doCalcPts(int64_t start_time, const AVRational time_base, int64_t pts)
+/* Frueher wurde hier zusaetzlich der EINMALIG beim Session-Start von FFmpeg
+ * gesetzte, globale AVFormatContext->start_time abgezogen. Das normalisierte
+ * zwar den allerersten Clip einer Session sauber auf ~0, verglich aber JEDEN
+ * spaeteren Clip (jeder Werbespot, jeder Einspieler) fuer immer gegen diese
+ * eine fremde Referenz -- ob ein Clip damit einen gueltigen oder negativen
+ * (=INVALID_PTS_VALUE) Wert ergab, hing so rein davon ab, was zufaellig
+ * zuerst in der Session lief, nicht vom Clip selbst (beobachtet .11
+ * 2026-07-26: derselbe Werbespot lief fehlerfrei, wenn er zuerst kam, aber
+ * blieb haengen, wenn ein anderer Clip vorher schon die Referenz gesetzt
+ * hatte). Die Normalisierung passiert jetzt ausschliesslich ueber den
+ * Pointer-basierten Offset-Cache (resolveAndCachePtsOffset/
+ * lookupCachedPtsOffset), der jeden Stream-Pointer unabhaengig von den
+ * anderen behandelt. */
+static int64_t doCalcPts(const AVRational time_base, int64_t pts)
 {
     if (time_base.den > 0)
     {
         pts = av_rescale(pts, (int64_t)time_base.num * 90000, time_base.den);
-    }
-    
-    if (start_time != AV_NOPTS_VALUE)
-    {
-        pts -= 90000 * start_time / AV_TIME_BASE;
     }
 
     if (pts & 0x8000000000000000ull)
@@ -547,15 +603,457 @@ static int64_t doCalcPts(int64_t start_time, const AVRational time_base, int64_t
     return pts;
 }
 
-static int64_t calcPts(uint32_t avContextIdx, AVStream *stream, int64_t pts)
+static int64_t calcPts(AVStream *stream, int64_t pts)
 {
     if (!stream || pts == (int64_t)AV_NOPTS_VALUE)
     {
         ffmpeg_err("stream / packet null\n");
         return INVALID_PTS_VALUE;
     }
-    
-    return doCalcPts(avContextTab[avContextIdx]->start_time, stream->time_base, pts);
+
+    return doCalcPts(stream->time_base, pts);
+}
+
+static int64_t applyPtsOffset(int64_t rawPts, int64_t offset)
+{
+    if (rawPts == INVALID_PTS_VALUE)
+    {
+        return INVALID_PTS_VALUE;
+    }
+
+    int64_t corrected = rawPts - offset;
+
+    /* negativ oder > 33-Bit-PES-Grenze ist unplausibel - lieber verwerfen
+     * als ein Fantasie-PTS an die Hardware schreiben. */
+    if (corrected < 0 || corrected > 0x1FFFFFFFFLL)
+    {
+        return INVALID_PTS_VALUE;
+    }
+
+    return corrected;
+}
+
+#define PTS_OFFSET_CACHE_SIZE 4
+
+/* Schwellwert fuer die Sprungerkennung bei gleichbleibendem Stream-Pointer
+ * (90kHz-PTS-Takt). Urspruenglich 30s; experimentell auf 3s gesenkt
+ * (2026-07-26), da ein beobachtetes Wiederholungs-Muster bei einem
+ * Werbe-Uebergang eine interne ~30s-Oszillation zeigte, die exakt an der
+ * alten Schwelle vorbeirutschte (30,0s, nicht > 30s). 3s liegt weiterhin
+ * weit ueber normalem Frame-zu-Frame-Jitter/B-Frame-Reordering (typischerweise
+ * << 1s), aber komfortabel unter jeder bisher beobachteten echten
+ * Splice-Groessenordnung. Durch die Cross-Track-Kopplung und die
+ * Plausibilitaetspruefung ist ein zu frueh ausgeloester Relearn ungefaehrlich
+ * (er verankert sich wieder an der bestehenden Kontinuitaet) -- daher
+ * vertretbar, auch ohne abschliessend geklaerten Beweis fuer den exakten
+ * Nutzen in diesem einen Fall. */
+#define PTS_JUMP_RELEARN_THRESHOLD (3LL * 90000LL)
+
+/* Cross-Track-Kopplung gegen dauerhaften AV-Versatz (beobachtet .11
+ * 2026-07-26: Video wechselt auf einen neuen Pointer und lernt einen Offset
+ * rein aus seiner eigenen Historie, waehrend Audio unveraendert beim alten
+ * Pointer bleibt -- Ergebnis war ein dauerhafter Versatz von 5,83s). Siehe
+ * resolveAndCachePtsOffset() fuer die Verwendung. Zwei Absicherungen:
+ * (1) knownGoodAVDelta nur bei plausibler Differenz nachziehen, damit ein
+ * einseitiger Haenger (eine Spur steht, die andere laeuft normal) das Delta
+ * nicht auf einen Fantasiewert hochtreibt; (2) Cross-Anchoring nur, wenn die
+ * andere Spur "frisch" ist (kuerzlich noch ein gueltiges Update hatte),
+ * sonst wuerde z.B. ein komplett stummer Werbespot die andere Spur an einen
+ * minutenalten Wert zurückreissen. */
+static int64_t knownGoodAVDelta = 0; /* erwartete audioPts - videoPts Differenz */
+#define AV_DELTA_PLAUSIBLE_LIMIT (2LL * 90000LL)
+#define OTHER_TRACK_FRESHNESS_LIMIT 200
+
+/* Diagnose (2026-07-26): misst den TATSAECHLICHEN Verlauf von knownGoodAVDelta
+ * direkt, statt ihn nur indirekt aus Offset-Werten verschiedener Relearn-
+ * Ereignisse zu erschliessen -- Grundlage, um zwischen "driftet durch
+ * kontinuierliches Update" und "pendelt sich auf einen stabilen Puffer-Bias
+ * ein" zu unterscheiden. Wertbasiert statt zeitbasiert gedrosselt (nur bei
+ * Aenderung >= 100ms), keine time_t-Arithmetik in der Drossel-Bedingung --
+ * bewusst anders als der fehlerhafte Zeit-basierte Ansatz vom selben Tag. */
+static int64_t lastLoggedAVDelta = -999999;
+#define AV_DELTA_LOG_STEP (9000LL) /* 100ms */
+
+#define AV_DELTA_EMA_DIVISOR 32 /* Glaettungsfaktor des gleitenden Mittelwerts */
+
+static void updateKnownGoodAVDelta(int64_t currentDelta, bool otherTrackFreshForDelta)
+{
+    /* Die Plausibilitaetsgrenze (< 2s) allein reicht nicht, wenn eine Spur
+     * laenger haengt (z.B. Video mehrere Minuten eingefroren) - die andere
+     * Spur laeuft normal weiter, currentDelta waechst dabei SCHRITTWEISE durch
+     * den plausiblen
+     * Bereich (jeder einzelne Schritt < 2s), bis es beim naechsten echten
+     * Sprung mit einem bereits korrumpierten Delta (~1,66s beobachtet)
+     * verankert wird. Die bestehende Frische-Pruefung schuetzte bisher nur
+     * die Anker-Wahl (own/cross), nicht die Delta-Aktualisierung selbst --
+     * daher hier zusaetzlich: keine Aktualisierung, wenn die andere Spur
+     * gerade nicht frisch ist. */
+    if (!otherTrackFreshForDelta)
+    {
+        return;
+    }
+    if (llabs(currentDelta) >= AV_DELTA_PLAUSIBLE_LIMIT)
+    {
+        return;
+    }
+    /* Gleitender Mittelwert statt direkter Uebernahme: currentDelta oszilliert
+     * durch Demuxer-Interleaving kontinuierlich um +-100-115ms (direkt
+     * gemessen, .11 2026-07-26, /tmp/exteplayer3_av_delta.log) -- bleibt dabei
+     * ueber mehrere Relearn-Ereignisse hinweg stabil in derselben Bandbreite,
+     * driftet nicht weiter aus. Eine direkte Uebernahme wuerde bei jedem
+     * Cross-Anchor-Ereignis zufaellig eine der beiden Oszillations-Phasen
+     * einfrieren. Der Mittelwert bleibt anders als ein einmaliges Einfrieren
+     * weiterhin anpassungsfaehig, falls sich die tatsaechliche Beziehung
+     * spaeter legitim aendert (z.B. anders codierte Werbe-Inhalte). */
+    knownGoodAVDelta += (currentDelta - knownGoodAVDelta) / AV_DELTA_EMA_DIVISOR;
+
+    if (g_verbose_logging && llabs(knownGoodAVDelta - lastLoggedAVDelta) >= AV_DELTA_LOG_STEP)
+    {
+        lastLoggedAVDelta = knownGoodAVDelta;
+        FILE *dlog = fopen("/tmp/exteplayer3_av_delta.log", "a");
+        if (dlog)
+        {
+            fprintf(dlog, "%ld AV_DELTA_CHANGE knownGoodAVDelta=%lld\n",
+                    (long)time(NULL), (long long)knownGoodAVDelta);
+            fclose(dlog);
+        }
+    }
+}
+
+/* Der own/cross-Trust-Mechanismus oben schuetzt nur die Anker-KETTE (Serien
+ * von anchor=own waehrend die Gegenspur haengt). Er schuetzt NICHT die
+ * Qualitaet eines einzelnen, formal frischen UND vertrauenswuerdigen
+ * Cross-Deltas selbst. Beobachtet: nach einem laengeren (100s+) Totalausfall
+ * beider Spuren gleichzeitig (keine neue Pakete, siehe Kommentar an
+ * totalPacketCounter) sprang knownGoodAVDelta
+ * trotz durchgehend anchor=cross binnen weniger Sekunden von ~0,3s auf
+ * ~1,3s. Grund: OTHER_TRACK_FRESHNESS_LIMIT ist rein paketzaehlerbasiert --
+ * waechst totalPacketCounter waehrend des gesamten Freezes kaum (weil BEIDE
+ * Spuren gleichzeitig keine neuen Pakete bekommen), sieht der Paketabstand
+ * beim gemeinsamen Wiederanlauf trotzdem "frisch" aus, obwohl in echter
+ * Wanduhrzeit eine riesige Luecke bestand. Zusaetzlich starten Video und
+ * Audio nach so einem Totalausfall nicht zwingend phasengleich wieder
+ * (Ad-Stitcher-Neustart, unterschiedliche Puffertiefen) -- der allererste
+ * Cross-Wert danach ist daher strukturell unzuverlaessiger als im
+ * Normalbetrieb, in dem die Gegenspur durchgehend mitlief. */
+#define AV_DELTA_FREEZE_GAP_SECONDS 15
+#define AV_DELTA_CONFIRM_COUNT 4
+#define AV_DELTA_CONFIRM_MAX_SPREAD (9000LL * 2) /* 200ms erlaubte Streuung zwischen den Bestaetigungswerten */
+
+static int pendingConfirmCount = 0;
+static int64_t pendingConfirmValues[AV_DELTA_CONFIRM_COUNT];
+
+/* Wrapper um updateKnownGoodAVDelta(): nach einem erkannten langen Freeze
+ * (resumedFromLongFreeze) werden die ersten AV_DELTA_CONFIRM_COUNT Cross-
+ * Delta-Werte nur gesammelt statt sofort in die EMA zu uebernehmen. Erst wenn
+ * sie untereinander konsistent sind (Streuung < AV_DELTA_CONFIRM_MAX_SPREAD),
+ * wird ihr Mittelwert einmalig an updateKnownGoodAVDelta() weitergereicht.
+ * Sind sie zu inkonsistent, wird die Bestaetigungsphase verworfen (kein
+ * Update) statt einen unsicheren Wert zu uebernehmen -- der naechste erkannte
+ * Freeze-Wiederanlauf (oder ein neuer PTS-Sprung im Normalbetrieb) bekommt
+ * dann eine neue Chance. Ausserhalb einer Bestaetigungsphase (Normalbetrieb)
+ * verhaelt sich der Wrapper transparent wie ein direkter Aufruf. */
+static void feedAVDeltaSample(int64_t currentDelta, bool otherTrackFreshForDelta, bool resumedFromLongFreeze)
+{
+    if (!otherTrackFreshForDelta || llabs(currentDelta) >= AV_DELTA_PLAUSIBLE_LIMIT)
+    {
+        /* Bereits durch bestehende Fresh/Trust-Pruefung bzw. Plausibilitaets-
+         * grenze blockiert -- eine laufende Bestaetigungsphase deswegen nicht
+         * abbrechen, ein einzelner ungueltiger Zwischenwert soll sie nicht
+         * neu erzwingen muessen. */
+        return;
+    }
+
+    if (resumedFromLongFreeze)
+    {
+        pendingConfirmCount = 0; /* neuer Freeze -- alte Bestaetigungswerte verwerfen */
+    }
+
+    if (resumedFromLongFreeze || pendingConfirmCount > 0)
+    {
+        if (pendingConfirmCount < AV_DELTA_CONFIRM_COUNT)
+        {
+            pendingConfirmValues[pendingConfirmCount] = currentDelta;
+            pendingConfirmCount++;
+        }
+        if (pendingConfirmCount < AV_DELTA_CONFIRM_COUNT)
+        {
+            return; /* noch nicht genug Bestaetigungswerte gesammelt */
+        }
+
+        int64_t minVal = pendingConfirmValues[0];
+        int64_t maxVal = pendingConfirmValues[0];
+        int64_t sum = pendingConfirmValues[0];
+        int i;
+        for (i = 1; i < AV_DELTA_CONFIRM_COUNT; i++)
+        {
+            if (pendingConfirmValues[i] < minVal) minVal = pendingConfirmValues[i];
+            if (pendingConfirmValues[i] > maxVal) maxVal = pendingConfirmValues[i];
+            sum += pendingConfirmValues[i];
+        }
+        pendingConfirmCount = 0; /* Bestaetigungsphase abgeschlossen (erfolgreich oder nicht) */
+
+        if ((maxVal - minVal) >= AV_DELTA_CONFIRM_MAX_SPREAD)
+        {
+            if (g_verbose_logging)
+            {
+                FILE *dlog = fopen("/tmp/exteplayer3_av_delta.log", "a");
+                if (dlog)
+                {
+                    fprintf(dlog, "%ld AV_DELTA_CONFIRM_REJECTED spread=%lld\n",
+                            (long)time(NULL), (long long)(maxVal - minVal));
+                    fclose(dlog);
+                }
+            }
+            return;
+        }
+        currentDelta = sum / AV_DELTA_CONFIRM_COUNT;
+    }
+
+    updateKnownGoodAVDelta(currentDelta, true);
+}
+
+typedef struct
+{
+    void   *streamPtr;
+    int64_t offset;
+    int     learned;
+    /* true = Offset wurde zuletzt gegen eine frische Gegenspur gelernt
+     * (anchor=cross), false = nur gegen die eigene Historie (anchor=own).
+     * Verhindert, dass ein Offset, der waehrend eines Freezes der Gegenspur
+     * mehrfach nur gegen sich selbst neu gelernt wurde, per Cross-Anchor an
+     * die Gegenspur weitergereicht wird oder in knownGoodAVDelta einsickert
+     * (siehe resolveAndCachePtsOffset/updateKnownGoodAVDelta-Aufrufe unten;
+     * Fund .11 2026-07-27: Video fror ~4,8s bei einem Mehrfach-Ad-Splice ein,
+     * Audio lernte in dieser Zeit mehrfach hintereinander anchor=own und
+     * driftete dabei auf einen um ~1,4s verschobenen Offset, der danach von
+     * Video per Cross-Anchor uebernommen und von knownGoodAVDelta als neuer
+     * "gueltiger" Wert geglaettet wurde). */
+    bool    trusted;
+} PtsOffsetCacheEntry_t;
+
+/* Lernt (einmalig) oder nutzt einen bereits bekannten Offset fuer einen
+ * konkreten AVStream-Pointer. Anders als eine einzelne veraenderliche
+ * Offset-Variable wird der Offset pro Pointer dauerhaft eingefroren:
+ * springt der Demuxer waehrend eines Ad-Splices ueber mehrere Sekunden
+ * zwischen zwei AVStream-Objekten hin und her (beobachtet 2026-07-25/26),
+ * wird fuer beide Pointer nur je einmal gelernt statt bei jedem Wechsel neu
+ * (und damit potentiell falsch) berechnet zu werden.
+ *
+ * Zusaetzlich: manche Ad-Splices behalten denselben AVStream-Pointer bei,
+ * aber der rohe Zeitstempel macht trotzdem einen riesigen Sprung (beobachtet
+ * .11 2026-07-26: Sprung von PTS~33 Mio. auf ~8,58 Mrd., positiv und < 2^33,
+ * besteht daher applyPtsOffset()'s Plausibilitaetspruefung unbemerkt). Da
+ * hier kein Pointer-Wechsel als Signal existiert, wird zusaetzlich die
+ * absolute Differenz zum letzten guten Wert ueberwacht: bei Ueberschreiten
+ * von PTS_JUMP_RELEARN_THRESHOLD wird der Offset fuer denselben Pointer
+ * sofort neu gelernt statt an einem erkennbar veralteten Wert festzuhalten.
+ *
+ * otherTrack*-Parameter beziehen sich auf die jeweils ANDERE Spur (Video
+ * beim Audio-Aufruf, Audio beim Video-Aufruf) und dienen ausschliesslich dem
+ * Cross-Track-Anchoring oben; isAudio steuert das Vorzeichen von
+ * knownGoodAVDelta. packetCounterAtLastGoodPts wird bei jedem gueltigen
+ * Update der EIGENEN Spur auf totalPacketCounter gesetzt. */
+static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheSize,
+                                         void *streamPtr, int64_t rawPts,
+                                         int64_t *lastGoodPts, int *nextSlot, const char *trackTag,
+                                         int isAudio, int64_t otherTrackLastGoodPts,
+                                         int64_t otherTrackPacketCounterAtLastGood,
+                                         bool otherTrackTrusted,
+                                         int64_t totalPacketCounter,
+                                         int64_t *packetCounterAtLastGoodPts,
+                                         time_t *wallClockAtLastGoodPts,
+                                         bool *outTrusted,
+                                         int64_t *sessionBasePts)
+{
+    bool otherTrackFresh = (otherTrackLastGoodPts >= 0) &&
+            ((totalPacketCounter - otherTrackPacketCounterAtLastGood) < OTHER_TRACK_FRESHNESS_LIMIT);
+    int64_t crossTarget = otherTrackLastGoodPts + (isAudio ? knownGoodAVDelta : -knownGoodAVDelta);
+
+    int i;
+    for (i = 0; i < cacheSize; i++)
+    {
+        if (cache[i].learned && cache[i].streamPtr == streamPtr)
+        {
+            int64_t corrected = applyPtsOffset(rawPts, cache[i].offset);
+            bool needRelearn = false;
+
+            if (corrected == INVALID_PTS_VALUE)
+            {
+                /* Das rohe PTS war gueltig, aber mit dem gecachten Offset
+                 * verrechnet ergibt sich ein negativer/unplausibler Wert (z.B.
+                 * ein neuer Werbespot mit deutlich niedrigerer eigener
+                 * Zeitbasis als der bisherige Offset erwartet). Ohne diesen
+                 * Zweig wuerde die Sprungerkennung unten uebersprungen und
+                 * dieser Pointer koennte sich dauerhaft in INVALID_PTS_VALUE
+                 * festfahren. (Ursache eines am selben Tag beobachteten
+                 * Freezes war laut Paket-Zaehler-Log allerdings ein reines
+                 * CDN-Datenloch: null Video-Pakete ueber 141s, nicht falsch
+                 * verrechnete Werte.) */
+                needRelearn = (rawPts != INVALID_PTS_VALUE && *lastGoodPts >= 0);
+            }
+            else if (*lastGoodPts >= 0 && llabs(corrected - *lastGoodPts) > PTS_JUMP_RELEARN_THRESHOLD)
+            {
+                needRelearn = true;
+            }
+
+            if (needRelearn)
+            {
+                /* otherTrackFresh entscheidet bereits oben, ob target der
+                 * Gegenspur folgt (cross) oder nur der eigenen Historie (own)
+                 * -- trusted spiegelt exakt das wider, damit ein spaeterer
+                 * Cross-Anchor der Gegenspur bzw. ein knownGoodAVDelta-Update
+                 * nicht auf einem rein selbstreferenziellen Offset aufbaut. */
+                int64_t target = otherTrackFresh ? crossTarget : *lastGoodPts;
+                int64_t newOffset = rawPts - target;
+                cache[i].offset = newOffset;
+                cache[i].trusted = otherTrackFresh;
+                corrected = applyPtsOffset(rawPts, newOffset);
+
+                if (g_verbose_logging)
+                {
+                    FILE *plog = fopen("/tmp/exteplayer3_pts_offset.log", "a");
+                    if (plog)
+                    {
+                        fprintf(plog, "%ld %s relearn (jump) stream=%p offset=%lld anchor=%s\n",
+                                (long)time(NULL), trackTag, streamPtr, (long long)newOffset,
+                                otherTrackFresh ? "cross" : "own");
+                        fclose(plog);
+                    }
+                }
+            }
+            if (corrected != INVALID_PTS_VALUE)
+            {
+                *lastGoodPts = corrected;
+                *packetCounterAtLastGoodPts = totalPacketCounter;
+                time_t now = time(NULL);
+                bool resumedFromLongFreeze = (*wallClockAtLastGoodPts > 0) &&
+                        ((now - *wallClockAtLastGoodPts) > AV_DELTA_FREEZE_GAP_SECONDS);
+                *wallClockAtLastGoodPts = now;
+                if (outTrusted)
+                {
+                    *outTrusted = cache[i].trusted;
+                }
+                if (otherTrackLastGoodPts >= 0)
+                {
+                    int64_t currentDelta = isAudio ? (corrected - otherTrackLastGoodPts)
+                                                    : (otherTrackLastGoodPts - corrected);
+                    /* Nur vertrauen, wenn die Gegenspur sowohl frisch ist ALS
+                     * AUCH selbst zuletzt cross-verankert wurde -- sonst
+                     * koennte ein waehrend eines Freezes der eigenen Spur nur
+                     * gegen sich selbst gelernter Wert der Gegenspur unbemerkt
+                     * in knownGoodAVDelta einsickern (siehe Kommentar an
+                     * PtsOffsetCacheEntry_t.trusted). resumedFromLongFreeze
+                     * faengt zusaetzlich den Fall ab, dass beide Spuren
+                     * gleichzeitig lange standen (siehe feedAVDeltaSample). */
+                    feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+                }
+            }
+            return corrected;
+        }
+    }
+
+    if (rawPts == INVALID_PTS_VALUE)
+    {
+        return INVALID_PTS_VALUE;
+    }
+
+    int64_t offset;
+    if (*lastGoodPts >= 0)
+    {
+        int64_t target = otherTrackFresh ? crossTarget : *lastGoodPts;
+        offset = rawPts - target;
+    }
+    else
+    {
+        /* Erstes jemals gelerntes PTS dieser Spur in dieser Session (noch keine
+         * eigene Kontinuitaet vorhanden) -- hier NIE auf die Gegenspur cross-
+         * ankern, selbst wenn sie schon "frisch" ist. knownGoodAVDelta steht zu
+         * Sessionbeginn noch auf dem Default 0, ein Cross-Anchor wuerde also
+         * den tatsaechlichen, im Container gewollten Audio/Video-Versatz sofort
+         * auf 0 zwingen und diesen Fehlwert ueber feedAVDeltaSample dauerhaft
+         * festschreiben -- Stream lief danach permanent asynchron (beobachtet
+         * bei einem Stream mit Referer-Header ueber StreamAnything, 2026-07-29).
+         * Beide Spuren muessen ihren initialen Offset unabhaengig voneinander
+         * aus dem eigenen rohen PTS lernen, um den nativen Versatz des
+         * Containers zu erhalten. Der Cross-Anchor-Mechanismus bleibt fuer
+         * seinen eigentlichen Zweck (Spur bekommt MITTEN im Stream einen neuen
+         * Pointer, waehrend sie bereits Kontinuitaet hat) unveraendert aktiv --
+         * das laeuft ueber den *lastGoodPts>=0-Zweig oben, nicht hier.
+         *
+         * Trotzdem soll die resultierende Position nicht den vollen rohen,
+         * bei manchen Live-Streams wallclock-artigen PTS-Wert zeigen (z.B.
+         * "Minuten seit dem letzten Reset des Webcam-Encoders"). Die zuerst
+         * startende Spur setzt daher sessionBasePts einmalig auf ihren
+         * eigenen rohen PTS, danach ziehen BEIDE Spuren bei ihrem jeweils
+         * ersten Lernen denselben gemeinsamen Nullpunkt ab -- der natuerliche
+         * A/V-Versatz bleibt dabei erhalten, nur die absolute Position
+         * startet nahe 0 statt bei einem verwirrenden Fantasiewert. */
+        if (sessionBasePts && *sessionBasePts < 0)
+        {
+            *sessionBasePts = rawPts;
+        }
+        offset = sessionBasePts ? *sessionBasePts : 0;
+    }
+    int slot = *nextSlot;
+    cache[slot].streamPtr = streamPtr;
+    cache[slot].offset = offset;
+    cache[slot].learned = 1;
+    /* otherTrackFresh bestimmt oben in beiden Zweigen (target=crossTarget
+     * bzw. offset=rawPts-crossTarget) einheitlich, ob cross oder own/0
+     * verwendet wurde -- siehe Kommentar an PtsOffsetCacheEntry_t.trusted. */
+    cache[slot].trusted = otherTrackFresh;
+    *nextSlot = (slot + 1) % cacheSize;
+
+    if (g_verbose_logging)
+    {
+        FILE *plog = fopen("/tmp/exteplayer3_pts_offset.log", "a");
+        if (plog)
+        {
+            fprintf(plog, "%ld %s learn stream=%p offset=%lld anchor=%s\n",
+                    (long)time(NULL), trackTag, streamPtr, (long long)offset,
+                    (*lastGoodPts < 0 && otherTrackFresh) ? "cross" : "own");
+            fclose(plog);
+        }
+    }
+
+    int64_t corrected = applyPtsOffset(rawPts, offset);
+    if (corrected != INVALID_PTS_VALUE)
+    {
+        *lastGoodPts = corrected;
+        *packetCounterAtLastGoodPts = totalPacketCounter;
+        time_t now = time(NULL);
+        bool resumedFromLongFreeze = (*wallClockAtLastGoodPts > 0) &&
+                ((now - *wallClockAtLastGoodPts) > AV_DELTA_FREEZE_GAP_SECONDS);
+        *wallClockAtLastGoodPts = now;
+        if (outTrusted)
+        {
+            *outTrusted = cache[slot].trusted;
+        }
+        if (otherTrackLastGoodPts >= 0)
+        {
+            int64_t currentDelta = isAudio ? (corrected - otherTrackLastGoodPts)
+                                            : (otherTrackLastGoodPts - corrected);
+            feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+        }
+    }
+    return corrected;
+}
+
+/* Reine Anwendung eines bereits gelernten Offsets, ohne selbst zu lernen -
+ * fuer DTS und abgeleitete Zeitstempel, die denselben Offset wie der
+ * zugehoerige PTS derselben Spur/desselben Pointers verwenden muessen. */
+static int64_t lookupCachedPtsOffset(PtsOffsetCacheEntry_t *cache, int cacheSize, void *streamPtr, int64_t rawPts)
+{
+    int i;
+    for (i = 0; i < cacheSize; i++)
+    {
+        if (cache[i].learned && cache[i].streamPtr == streamPtr)
+        {
+            return applyPtsOffset(rawPts, cache[i].offset);
+        }
+    }
+    return INVALID_PTS_VALUE;
 }
 
 /* search for metatdata in context and stream
@@ -614,7 +1112,53 @@ static void FFMPEGThread(Context_t *context)
      */
     int64_t lastVideoDts = -1;
     int64_t lastAudioDts = -1;
-    
+
+    /* Pointer-basierte PTS-Kontinuitaets-Korrektur an HLS-Splice-Grenzen, mit
+     * Offset-Cache pro AVStream-Pointer statt einer einzelnen veraenderlichen
+     * Offset-Variable (siehe resolveAndCachePtsOffset/lookupCachedPtsOffset):
+     * springt der Demuxer waehrend eines Splices mehrfach zwischen zwei
+     * Stream-Objekten hin und her, wird fuer jeden Pointer nur einmal
+     * gelernt statt bei jedem Wechsel neu berechnet. */
+    int64_t lastGoodVideoPts = -1;
+    int64_t lastGoodAudioPts = -1;
+    /* Wird von der zuerst startenden Spur (Audio oder Video, je nachdem was
+     * zuerst ein Paket liefert) einmalig auf deren allerersten rohen PTS
+     * gesetzt und danach von BEIDEN Spuren beim eigenen ersten Lernen als
+     * gemeinsamer Nullpunkt abgezogen (siehe resolveAndCachePtsOffset).
+     * Ohne das behaelt eine Spur ohne fremde Laengenangabe (z.B. eine reine
+     * Live-Webcam-URL) ihren vollen rohen, oft wallclock-artigen PTS-Wert als
+     * Wiedergabeposition - fuer den Nutzer sichtbar als ein Player, der beim
+     * Start nicht bei 0:00 sondern bei einem beliebigen, verwirrenden Wert
+     * (z.B. "seit dem letzten Reset des Webcam-Encoders") losläuft, obwohl
+     * die eigentliche Zeitanzeige inzwischen korrekt mitzaehlt (Laengen-
+     * Overflow bereits separat gefixt). Der natuerliche A/V-Versatz bleibt
+     * erhalten, da beide Spuren denselben Nullpunkt abziehen. */
+    int64_t sessionBasePts = -1;
+    /* Spiegelt PtsOffsetCacheEntry_t.trusted der jeweils zuletzt verwendeten
+     * Cache-Zeile -- wird der Gegenspur beim naechsten Aufruf als
+     * otherTrackTrusted mitgegeben (siehe resolveAndCachePtsOffset). */
+    bool lastGoodVideoPtsTrusted = false;
+    bool lastGoodAudioPtsTrusted = false;
+    /* Paket-Zaehler-Zeitstempel des jeweils letzten gueltigen lastGoodPts-
+     * Updates - Grundlage fuer die Cross-Track-Frische-Pruefung in
+     * resolveAndCachePtsOffset() (siehe dort). */
+    int64_t packetCounterAtLastGoodVideoPts = 0;
+    int64_t packetCounterAtLastGoodAudioPts = 0;
+    /* Wanduhr-Gegenstueck zu packetCounterAtLastGoodPts -- deckt den Fall ab,
+     * dass waehrend eines langen Freezes BEIDE Spuren gleichzeitig kaum neue
+     * Pakete bekommen und der Paketzaehler dadurch faelschlich "frisch"
+     * anzeigt (siehe feedAVDeltaSample). 0 = noch nie gesetzt. */
+    time_t lastGoodVideoPtsWallClock = 0;
+    time_t lastGoodAudioPtsWallClock = 0;
+    PtsOffsetCacheEntry_t videoPtsOffsetCache[PTS_OFFSET_CACHE_SIZE];
+    PtsOffsetCacheEntry_t audioPtsOffsetCache[PTS_OFFSET_CACHE_SIZE];
+    memset(videoPtsOffsetCache, 0, sizeof(videoPtsOffsetCache));
+    memset(audioPtsOffsetCache, 0, sizeof(audioPtsOffsetCache));
+    int videoCacheNextSlot = 0;
+    int audioCacheNextSlot = 0;
+
+    int64_t totalPacketCounter = 0;
+
     int64_t multiContextLastPts[IPTV_AV_CONTEXT_MAX_NUM] = {INVALID_PTS_VALUE, INVALID_PTS_VALUE};
     
     int64_t showtime = 0;
@@ -846,10 +1390,25 @@ static void FFMPEGThread(Context_t *context)
             Track_t *subtitleTrack = NULL;
 
             int32_t pid = avContextTab[cAVIdx]->streams[packet.stream_index]->id;
-            
-            multiContextLastPts[cAVIdx] = calcPts(cAVIdx, avContextTab[cAVIdx]->streams[packet.stream_index], packet.pts);
+            /* Der Stream des AKTUELLEN Pakets, direkt aus dem Demuxer. Bewusst
+             * nicht videoTrack->stream/audioTrack->stream verwenden: die werden
+             * nur aufgefrischt, wenn sich die (bei HLS pro Variante konstante,
+             * nicht pro Segment eindeutige) Id aendert - bleibt sie bei einem
+             * Ad-Splice zufaellig gleich, zeigen Track->stream weiter auf ein
+             * altes, gueltiges aber falsches AVStream-Objekt mit abweichender
+             * time_base (beobachtet .11 2026-07-26: Werbespot-zu-Werbespot-
+             * Uebergaenge liefen deswegen minutenlang in einer PTS-Schleife). */
+            AVStream *pktStream = avContextTab[cAVIdx]->streams[packet.stream_index];
+
+            multiContextLastPts[cAVIdx] = calcPts(pktStream, packet.pts);
             ffmpeg_printf(200, "Ctx %d PTS: %"PRId64" PTS[1] %"PRId64"\n", cAVIdx, multiContextLastPts[cAVIdx], multiContextLastPts[1]);
-            
+
+            /* Zaehlt JEDES von av_read_frame() erfolgreich gelieferte Paket,
+             * unabhaengig von Typ/Routing/Discard -- Grundlage fuer die
+             * paketzaehlerbasierte Cross-Track-Frische-Pruefung in
+             * resolveAndCachePtsOffset() (siehe OTHER_TRACK_FRESHNESS_LIMIT). */
+            totalPacketCounter++;
+
             reset_finish_timeout();
             if(avContextTab[cAVIdx]->streams[packet.stream_index]->discard != AVDISCARD_ALL)
             {
@@ -872,16 +1431,164 @@ static void FFMPEGThread(Context_t *context)
             {
                 ffmpeg_printf(1, "SKIP DISCARDED PACKET packed_size[%d] stream_index[%d] pid[%d]\n", packet.size, (int)packet.stream_index, pid);
             }
-            
+
+            /* Legt der HLS-/MPEGTS-Demuxer bei einem Segment- oder PMT-Uebergang
+             * (z.B. Ad-Splice) ein neues AVStream-Objekt fuer dieselbe logische
+             * Spur an, bekommt es eine neue eigene ->id. videoTrack->Id/
+             * audioTrack->Id werden aber nur einmal beim initialen Track-Setup
+             * gesetzt. Ohne Auffrischung schlaegt der Identitaetsabgleich
+             * (Id == pid) ab diesem Punkt dauerhaft fehl -- Pakete kommen zwar
+             * weiter an, werden aber nie mehr an den Decoder geschrieben (Bild/
+             * Ton bleiben aus). Bei Typ-Uebereinstimmung aber Id-Mismatch daher
+             * den Track auf den neuen Stream ummelden. */
+            {
+                if (videoTrack && videoTrack->AVIdx == cAVIdx && videoTrack->Id != pid &&
+                    get_codecpar(pktStream)->codec_type == AVMEDIA_TYPE_VIDEO)
+                {
+                    bool haveValidDims = get_codecpar(pktStream)->width > 0 && get_codecpar(pktStream)->height > 0;
+
+                    /* Frueher wurde die Id-/Stream-Ummeldung erst nach bis zu 20
+                     * Paketen (oder sobald gueltige Dimensionen da waren) committet.
+                     * In der Zwischenzeit passte weder Video- noch Audio-Id zum
+                     * Paket, es wurde unbeobachtet verworfen - nachweislich echte
+                     * Videopakete (siehe DROPPED-Log), was zu sichtbaren
+                     * Standbildern fuehren kann. Jetzt: Id/Stream sofort umschalten
+                     * (wie beim Audio-Pfad), Dimensionen aber erst uebernehmen,
+                     * sobald sie tatsaechlich verfuegbar sind - bis dahin gelten die
+                     * alten Werte als beste Vermutung weiter, aber es wird kein
+                     * einziges Paket mehr verworfen. */
+                    videoTrack->Id = pid;
+                    videoTrack->stream = (void*)pktStream;
+                    pktStream->discard = AVDISCARD_DEFAULT; /* sicherstellen, dass der neue Stream nicht als "nicht benoetigt" gilt */
+                    if (haveValidDims)
+                    {
+                        videoTrack->width = get_codecpar(pktStream)->width;
+                        videoTrack->height = get_codecpar(pktStream)->height;
+                        videoTrack->aspect_ratio_num = pktStream->sample_aspect_ratio.num;
+                        videoTrack->aspect_ratio_den = pktStream->sample_aspect_ratio.den;
+                        if (0 == videoTrack->aspect_ratio_num || 0 == videoTrack->aspect_ratio_den)
+                        {
+                            videoTrack->aspect_ratio_num = get_codecpar(pktStream)->sample_aspect_ratio.num;
+                            videoTrack->aspect_ratio_den = get_codecpar(pktStream)->sample_aspect_ratio.den;
+                        }
+                        {
+                            AVRational rateRational = get_frame_rate(pktStream);
+                            if (rateRational.den != 0)
+                            {
+                                videoTrack->frame_rate = (uint32_t)(1000 * (int64_t)(rateRational.num) / (int64_t)(rateRational.den));
+                            }
+                        }
+                        videoTrack->TimeScale = (videoTrack->frame_rate < 23970) ? 1001 : 1000;
+                    }
+                    /* sonst: alte width/height/frame_rate/TimeScale/extraData behalten (beste Vermutung) */
+                    if (get_codecpar(pktStream)->extradata_size > 0)
+                    {
+                        videoTrack->extraData = get_codecpar(pktStream)->extradata;
+                        videoTrack->extraSize = get_codecpar(pktStream)->extradata_size;
+                    }
+                }
+                else if (videoTrack && videoTrack->AVIdx == cAVIdx && videoTrack->Id == pid &&
+                         get_codecpar(pktStream)->codec_type == AVMEDIA_TYPE_VIDEO &&
+                         (0 == videoTrack->width || 0 == videoTrack->height) &&
+                         get_codecpar(pktStream)->width > 0 && get_codecpar(pktStream)->height > 0)
+                {
+                    /* Dimensionen kamen erst ein paar Pakete NACH der sofortigen
+                     * Id-Umschaltung an - jetzt nachtragen. */
+                    videoTrack->width = get_codecpar(pktStream)->width;
+                    videoTrack->height = get_codecpar(pktStream)->height;
+                    videoTrack->aspect_ratio_num = pktStream->sample_aspect_ratio.num;
+                    videoTrack->aspect_ratio_den = pktStream->sample_aspect_ratio.den;
+                    if (0 == videoTrack->aspect_ratio_num || 0 == videoTrack->aspect_ratio_den)
+                    {
+                        videoTrack->aspect_ratio_num = get_codecpar(pktStream)->sample_aspect_ratio.num;
+                        videoTrack->aspect_ratio_den = get_codecpar(pktStream)->sample_aspect_ratio.den;
+                    }
+                    {
+                        AVRational rateRational = get_frame_rate(pktStream);
+                        if (rateRational.den != 0)
+                        {
+                            videoTrack->frame_rate = (uint32_t)(1000 * (int64_t)(rateRational.num) / (int64_t)(rateRational.den));
+                        }
+                    }
+                    videoTrack->TimeScale = (videoTrack->frame_rate < 23970) ? 1001 : 1000;
+                }
+                if (audioTrack && audioTrack->AVIdx == cAVIdx && audioTrack->Id != pid &&
+                    get_codecpar(pktStream)->codec_type == AVMEDIA_TYPE_AUDIO)
+                {
+                    int32_t oldId = audioTrack->Id;
+                    int32_t oldCodecId = audioTrack->stream ? (int32_t)get_codecpar((AVStream*)audioTrack->stream)->codec_id : -1;
+
+                    audioTrack->Id = pid;
+                    audioTrack->stream = (void*)pktStream;
+                    pktStream->discard = AVDISCARD_DEFAULT;
+
+                    /* Der Software-Decode-Pfad (inject_as_pcm, aktiv bei -a/-d/-l) haelt
+                     * einen langlebigen AVCodecContext, der nur einmal beim initialen
+                     * Track-Setup gegen den damaligen AVStream geoeffnet wurde. Ohne
+                     * Neuoeffnung gegen den hier frisch zugewiesenen Stream werden
+                     * Pakete mit ggf. geaenderter Codec-Config (z.B. LATM/LOAS-Extradata
+                     * bei einem Ad-Splice) durch einen dafuer nicht mehr passenden
+                     * Decoder-Kontext geschickt - Ton bleibt fuer mehrere Sekunden aus
+                     * oder verzerrt, ohne dass ein Fehler geloggt wird. */
+                    if (g_verbose_logging)
+                    {
+                        FILE *arlog = fopen("/tmp/exteplayer3_audio_reinit.log", "a");
+                        if (arlog)
+                        {
+                            fprintf(arlog, "%ld AUDIO_ID_SWITCH oldId=%d newId=%d oldCodecId=%d newCodecId=%d inject_as_pcm=%d\n",
+                                    (long)time(NULL), oldId, pid, oldCodecId,
+                                    (int32_t)get_codecpar(pktStream)->codec_id, audioTrack->inject_as_pcm);
+                            fclose(arlog);
+                        }
+                    }
+
+                    if (audioTrack->inject_as_pcm == 1)
+                    {
+                        AVCodecContext *newCodecCtx = wrapped_avcodec_get_context(cAVIdx, pktStream);
+                        const AVCodec *codec = newCodecCtx ? avcodec_find_decoder(get_codecpar(pktStream)->codec_id) : NULL;
+                        int openRet = -1;
+
+                        if (newCodecCtx && codec)
+                        {
+                            openRet = avcodec_open2(newCodecCtx, codec, NULL);
+                            if (0 == openRet)
+                            {
+                                audioTrack->avCodecCtx = newCodecCtx;
+                                restart_audio_resampling = 1;
+                            }
+                        }
+
+                        if (g_verbose_logging)
+                        {
+                            FILE *arlog = fopen("/tmp/exteplayer3_audio_reinit.log", "a");
+                            if (arlog)
+                            {
+                                fprintf(arlog, "%ld AUDIO_CODEC_REINIT newCodecCtx=%p codec=%p codecName=%s openRet=%d restart_audio_resampling=%d\n",
+                                        (long)time(NULL), (void*)newCodecCtx, (void*)codec,
+                                        codec ? codec->name : "-", openRet, restart_audio_resampling);
+                                fclose(arlog);
+                            }
+                        }
+                    }
+                }
+            }
+
             ffmpeg_printf(200, "packet.size %d - index %d\n", packet.size, pid);
 
-            if (videoTrack && (videoTrack->AVIdx == cAVIdx) && (videoTrack->Id == pid))
+            /* Bei einem Segment-/Discontinuity-Uebergang kann der Demuxer einem neuen
+             * Stream zufaellig dieselbe ->id wie ein zuvor bekannter Track vergeben
+             * (z.B. Video-id == alte Audio-id). Ohne diese Typ-Pruefung wuerden dann
+             * Video- oder Metadaten-Pakete faelschlich als Audio (oder umgekehrt)
+             * geroutet und an den falschen Decoder geschickt - dort werden sie als
+             * ungueltige Daten abgelehnt (AVERROR_INVALIDDATA), Ton/Bild setzen aus. */
+            if (videoTrack && (videoTrack->AVIdx == cAVIdx) && (videoTrack->Id == pid) &&
+                get_codecpar(avContextTab[cAVIdx]->streams[packet.stream_index])->codec_type == AVMEDIA_TYPE_VIDEO)
             {
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(56, 34, 100)
                 AVCodecContext *codec_context = videoTrack->avCodecCtx;
                 if (codec_context && codec_context->codec_id == AV_CODEC_ID_MPEG4 && NULL != mpeg4p2_context)
                 {
-                    mpeg4p2_write_packet(context, mpeg4p2_context, videoTrack, cAVIdx, &currentVideoPts, &latestPts, &packet);
+                    mpeg4p2_write_packet(context, mpeg4p2_context, videoTrack, &currentVideoPts, &latestPts, &packet);
                     update_max_injected_pts(latestPts);
                 }
                 else
@@ -890,15 +1597,26 @@ static void FFMPEGThread(Context_t *context)
                 if (get_codecpar(avContextTab[cAVIdx]->streams[packet.stream_index])->codec_id == AV_CODEC_ID_FLV1 &&
                     0 == memcmp(videoTrack->Encoding, "V_MPEG4", 7) )
                 {
-                    flv2mpeg4_write_packet(context, &flv2mpeg4_context, videoTrack, cAVIdx, &currentVideoPts, &latestPts, &packet);
+                    flv2mpeg4_write_packet(context, &flv2mpeg4_context, videoTrack, &currentVideoPts, &latestPts, &packet);
                     update_max_injected_pts(latestPts);
                 }
                 else
 #endif
                 {
                     bool skipPacket = false;
-                    currentVideoPts = videoTrack->pts = pts = calcPts(cAVIdx, videoTrack->stream, packet.pts);
-                    videoTrack->dts = dts = calcPts(cAVIdx, videoTrack->stream, packet.dts);
+                    int64_t rawVideoPts = calcPts(pktStream, packet.pts);
+                    currentVideoPts = videoTrack->pts = pts = resolveAndCachePtsOffset(
+                            videoPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
+                            rawVideoPts, &lastGoodVideoPts, &videoCacheNextSlot, "VIDEO",
+                            0, lastGoodAudioPts, packetCounterAtLastGoodAudioPts,
+                            lastGoodAudioPtsTrusted,
+                            totalPacketCounter, &packetCounterAtLastGoodVideoPts,
+                            &lastGoodVideoPtsWallClock,
+                            &lastGoodVideoPtsTrusted,
+                            &sessionBasePts);
+                    videoTrack->dts = dts = lookupCachedPtsOffset(
+                            videoPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
+                            calcPts(pktStream, packet.dts));
 
                     if ((currentVideoPts != INVALID_PTS_VALUE) && (currentVideoPts > latestPts))
                     {
@@ -956,17 +1674,39 @@ static void FFMPEGThread(Context_t *context)
                         avOut.infoFlags = 1; // TS container
                     }
 
-                    if (Write(context->output->video->Write, context, &avOut, pts) < 0)
+                    /* INVALID_PTS_VALUE (0x200000000, ein Bit ueber der 33-Bit-PES-
+                     * PTS-Grenze) NIE an die Hardware schreiben: wird der Wert beim
+                     * Aufbau des PES-Headers auf 33 Bit gekuerzt, wird daraus PTS=0
+                     * - ein scheinbar gueltiger, aber komplett falscher Zeitstempel,
+                     * der die AV-Sync-Engine mit einem riesigen Ruecksprung
+                     * konfrontiert (fuehrt zu Standbild). Paket lieber
+                     * ueberspringen als mit Fantasie-PTS schreiben. */
+                    if (pts != INVALID_PTS_VALUE)
                     {
-                        ffmpeg_err("writing data to video device failed\n");
+                        if (Write(context->output->video->Write, context, &avOut, pts) < 0)
+                        {
+                            ffmpeg_err("writing data to video device failed\n");
+                        }
                     }
                 }
             }
-            else if (audioTrack && (audioTrack->AVIdx == cAVIdx) && (audioTrack->Id == pid)) 
+            else if (audioTrack && (audioTrack->AVIdx == cAVIdx) && (audioTrack->Id == pid) &&
+                     get_codecpar(avContextTab[cAVIdx]->streams[packet.stream_index])->codec_type == AVMEDIA_TYPE_AUDIO)
             {
                 uint8_t skipPacket = 0;
-                currentAudioPts = audioTrack->pts = pts = calcPts(cAVIdx, audioTrack->stream, packet.pts);
-                dts = calcPts(cAVIdx, audioTrack->stream, packet.dts);
+                int64_t rawAudioPts = calcPts(pktStream, packet.pts);
+                currentAudioPts = audioTrack->pts = pts = resolveAndCachePtsOffset(
+                        audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
+                        rawAudioPts, &lastGoodAudioPts, &audioCacheNextSlot, "AUDIO",
+                        1, lastGoodVideoPts, packetCounterAtLastGoodVideoPts,
+                        lastGoodVideoPtsTrusted,
+                        totalPacketCounter, &packetCounterAtLastGoodAudioPts,
+                        &lastGoodAudioPtsWallClock,
+                        &lastGoodAudioPtsTrusted,
+                        &sessionBasePts);
+                dts = lookupCachedPtsOffset(
+                        audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
+                        calcPts(pktStream, packet.dts));
 
                 if ((currentAudioPts != INVALID_PTS_VALUE) && (currentAudioPts > latestPts) && (!videoTrack))
                 {
@@ -1039,6 +1779,16 @@ static void FFMPEGThread(Context_t *context)
                     avOut.height     = 0;
                     avOut.type       = "audio";
 
+                    /* Anders als Video darf ein fehlender/ungueltiger PTS bei Audio
+                     * NICHT zum Verwerfen des ganzen Pakets fuehren: bei MPEG-TS/HLS
+                     * traegt oft nur das erste Audio-Frame eines PES-Pakets einen
+                     * echten Zeitstempel, alle folgenden Frames im selben Paket haben
+                     * keinen eigenen (AV_NOPTS_VALUE -> INVALID_PTS_VALUE). Die
+                     * Hardware ignoriert einen ungueltigen PTS ohnehin und spielt
+                     * einfach fortlaufend weiter - wurden diese Pakete verworfen statt
+                     * nur mit unklarem Zeitstempel geschrieben, entstanden haeufige
+                     * Aussetzer im Audiostrom (hoerbar als durchgehend verzerrter/
+                     * "knatternder" Ton, u.a. bei AAC-Streams ueber HLS beobachtet). */
                     if (Write(context->output->audio->Write, context, &avOut, pts) < 0)
                     {
                         ffmpeg_err("(raw pcm) writing data to audio device failed\n");
@@ -1088,22 +1838,52 @@ static void FFMPEGThread(Context_t *context)
                         }
 #if (LIBAVFORMAT_VERSION_MAJOR > 57) || ((LIBAVFORMAT_VERSION_MAJOR == 57) && (LIBAVFORMAT_VERSION_MINOR > 32))
                         int ret = avcodec_send_packet(c, &packet);
-                        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) 
+                        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
                         {
+                            if (g_verbose_logging)
+                            {
+                                FILE *arlog = fopen("/tmp/exteplayer3_audio_reinit.log", "a");
+                                if (arlog)
+                                {
+                                    fprintf(arlog,
+                                        "%ld AUDIO_SEND_PACKET_ERR ret=%d pktSize=%d ctxSampleRate=%d ctxChannels=%d "
+                                        "ctxExtradataSize=%d dataHead=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                                        (long)time(NULL), ret, packet.size,
+                                        c->sample_rate, c->channels, c->extradata_size,
+                                        packet.size > 0 ? packet.data[0] : 0,
+                                        packet.size > 1 ? packet.data[1] : 0,
+                                        packet.size > 2 ? packet.data[2] : 0,
+                                        packet.size > 3 ? packet.data[3] : 0,
+                                        packet.size > 4 ? packet.data[4] : 0,
+                                        packet.size > 5 ? packet.data[5] : 0,
+                                        packet.size > 6 ? packet.data[6] : 0,
+                                        packet.size > 7 ? packet.data[7] : 0);
+                                    fclose(arlog);
+                                }
+                            }
                             restart_audio_resampling = 1;
                             break;
                         }
-                        
+
                         if (ret >= 0)
                         {
                             packet.size = 0;
                         }
-                        
+
                         ret = avcodec_receive_frame(c, decoded_frame);
                         if (ret < 0)
                         {
-                            if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) 
+                            if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
                             {
+                                if (g_verbose_logging)
+                                {
+                                    FILE *arlog = fopen("/tmp/exteplayer3_audio_reinit.log", "a");
+                                    if (arlog)
+                                    {
+                                        fprintf(arlog, "%ld AUDIO_RECEIVE_FRAME_ERR ret=%d\n", (long)time(NULL), ret);
+                                        fclose(arlog);
+                                    }
+                                }
                                 restart_audio_resampling = 1;
                                 break;
                             }
@@ -1230,13 +2010,22 @@ static void FFMPEGThread(Context_t *context)
                             continue;
                         }
                         int64_t next_in_pts = av_rescale(wrapped_frame_get_best_effort_timestamp(decoded_frame),
-                                         ((AVStream*) audioTrack->stream)->time_base.num * (int64_t)out_sample_rate * c->sample_rate,
-                                         ((AVStream*) audioTrack->stream)->time_base.den);
+                                         pktStream->time_base.num * (int64_t)out_sample_rate * c->sample_rate,
+                                         pktStream->time_base.den);
                         int64_t next_out_pts = av_rescale(swr_next_pts(swr, next_in_pts),
-                                         ((AVStream*) audioTrack->stream)->time_base.den,
-                                         ((AVStream*) audioTrack->stream)->time_base.num * (int64_t)out_sample_rate * c->sample_rate);
-                        
-                        currentAudioPts = audioTrack->pts = pts = calcPts(cAVIdx, audioTrack->stream, next_out_pts);
+                                         pktStream->time_base.den,
+                                         pktStream->time_base.num * (int64_t)out_sample_rate * c->sample_rate);
+
+                        currentAudioPts = audioTrack->pts = pts = resolveAndCachePtsOffset(
+                                audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
+                                calcPts(pktStream, next_out_pts),
+                                &lastGoodAudioPts, &audioCacheNextSlot, "AUDIO",
+                                1, lastGoodVideoPts, packetCounterAtLastGoodVideoPts,
+                                lastGoodVideoPtsTrusted,
+                                totalPacketCounter, &packetCounterAtLastGoodAudioPts,
+                                &lastGoodAudioPtsWallClock,
+                                &lastGoodAudioPtsTrusted,
+                                &sessionBasePts);
                         out_samples = swr_convert(swr, &output[0], out_samples, (const uint8_t **) &decoded_frame->data[0], in_samples);
                         
                         //////////////////////////////////////////////////////////////////////
@@ -1296,7 +2085,7 @@ static void FFMPEGThread(Context_t *context)
                     {
                         ffmpeg_err("(aac) writing data to audio device failed\n");
                     }
-                } 
+                }
                 else if (pcmExtradata.codec_id == AV_CODEC_ID_VORBIS || pcmExtradata.codec_id == AV_CODEC_ID_OPUS ||
                          pcmExtradata.codec_id == AV_CODEC_ID_WMAV1 || pcmExtradata.codec_id == AV_CODEC_ID_WMAV2 ||
                          pcmExtradata.codec_id == AV_CODEC_ID_WMAPRO || pcmExtradata.codec_id == AV_CODEC_ID_WMALOSSLESS) {
@@ -1340,7 +2129,7 @@ static void FFMPEGThread(Context_t *context)
             else if (subtitleTrack && (subtitleTrack->Id == pid))
             {
                 int64_t duration = -1;
-                int64_t pts = calcPts(cAVIdx, subtitleTrack->stream, packet.pts);
+                int64_t pts = calcPts(subtitleTrack->stream, packet.pts);
                 AVStream *stream = subtitleTrack->stream;
                 
                 if (packet.duration != 0)
@@ -1373,8 +2162,34 @@ static void FFMPEGThread(Context_t *context)
                     }
                 }
             }
+            else
+            {
+                /* Weder Video- noch Audio- noch Untertitel-Branch hat das Paket
+                 * genommen. Fuer echte Timed-Metadata/ID3-Pakete ist das normal
+                 * und wird nicht geloggt. Wenn das Paket laut Demuxer aber
+                 * TATSAECHLICH Video oder Audio ist, ist das ein Problem: entweder
+                 * der Typ-Guard von heute hat es bei einer Id-Kollision abgelehnt
+                 * (frueher waere es fehlgeroutet worden), oder videoTrack->Id/
+                 * audioTrack->Id wurden nach einem Stream-Wechsel nie aufgefrischt.
+                 * Beides kann dazu fuehren, dass ein Track fuer den Rest der
+                 * Session gar nicht mehr beschrieben wird (Standbild). */
+                int32_t realType = get_codecpar(avContextTab[cAVIdx]->streams[packet.stream_index])->codec_type;
+                if (g_verbose_logging && (realType == AVMEDIA_TYPE_VIDEO || realType == AVMEDIA_TYPE_AUDIO))
+                {
+                    FILE *dlog = fopen("/tmp/exteplayer3_dropped_packet.log", "a");
+                    if (dlog)
+                    {
+                        fprintf(dlog, "%ld DROPPED pid=%d videoTrackId=%d audioTrackId=%d realCodecType=%d pktSize=%d\n",
+                                (long)time(NULL), pid,
+                                videoTrack ? videoTrack->Id : -1,
+                                audioTrack ? audioTrack->Id : -1,
+                                realType, packet.size);
+                        fclose(dlog);
+                    }
+                }
+            }
         }
-        else 
+        else
         {
             if( 0 != ffmpegStatus )
             {
@@ -1476,6 +2291,7 @@ static void FFMPEGThread(Context_t *context)
 /* **************************** */
 
 static int32_t terminating = 0;
+
 static int32_t interrupt_cb(void *ctx)
 {
     PlaybackHandler_t *p = (PlaybackHandler_t *)ctx;
@@ -1898,8 +2714,23 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
 
     	sprintf( num, "%u000", context->playback->httpTimeout );
         av_dict_set(&avio_opts, "timeout", num, 0); // default is 10s
+        /* "timeout" (oben) wirkt nur auf die initial per avformat_open_input()
+         * geoeffnete Verbindung -- ffio_copy_url_options() (aviobuf.c) kopiert
+         * fuer alle intern von hls.c nachgeladenen Segmente/Sub-Playlists
+         * explizit "rw_timeout" (nicht "timeout"), das bisher nie gesetzt
+         * wurde und defaultmaessig 0 (=deaktiviert) ist. Dadurch griff bei
+         * einem haengenden Read innerhalb eines HLS-Segment-/Playlist-Abrufs
+         * kein Timeout, egal was bei "timeout" stand. */
+        av_dict_set(&avio_opts, "rw_timeout", num, 0);
         av_dict_set(&avio_opts, "reconnect", "1", 0);
-        if (context->playback->isTSLiveMode) // special mode for live TS stream with skip packet 
+        /* Manche HLS-Origins (z.B. ARD) liefern deutlich kleinere Playlists,
+         * wenn Kompression angeboten wird -- FFmpeg kann gzip/deflate zwar
+         * dekodieren (zlib ist eingebunden), fordert es aber nie selbst an.
+         * Bei sehr grossen Live-Playlists kann das den Download unter
+         * Netzwerklast von mehreren Sekunden auf Bruchteile davon senken. */
+        av_dict_set(&avio_opts, "headers", "Accept-Encoding: gzip\r\n", AV_DICT_APPEND);
+
+        if (context->playback->isTSLiveMode) // special mode for live TS stream with skip packet
         {
             av_dict_set(&avio_opts, "seekable", "0", 0);
             av_dict_set(&avio_opts, "reconnect_at_eof", "1", 0);
@@ -1921,7 +2752,7 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
     if (g_hls_audio_default_only) {
         av_dict_set(&avio_opts, "hls_audio_default_only", "1", 0);
     }
-    
+
     pavio_opts = &avio_opts;
     
     if ((err = avformat_open_input(&avContextTab[AVIdx], filename, fmt, pavio_opts)) != 0)
@@ -1954,7 +2785,19 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
 
     //ffmpeg5: error: assignment of member 'flags' in read-only object -> so commented out next line
     //avContextTab[AVIdx]->iformat->flags |= AVFMT_SEEK_TO_PTS;
-    avContextTab[AVIdx]->flags = AVFMT_FLAG_GENPTS;
+    /* AVFMT_FLAG_DISCARD_CORRUPT: Live-Mitschnitt mit -L AV_DEBUG_LEVEL:24
+     * zeigte bei Werbe-Uebergaengen mancher HLS-Live-Streams wiederholten
+     * TS-Sync-Verlust (mpegts.c wechselt wild zwischen 188/192/204 Byte
+     * Paketgroesse), der zu "Packet corrupt"- und "Invalid timestamps"-
+     * Meldungen fuehrt - ff_parse_pes_pts() validiert keine Marker-Bits und
+     * interpretiert bei falschem Byte-Offset Zufallsbytes als PTS/DTS nahe
+     * 2^33 (deckt sich mit dem separat gefundenen ~8,58-Mrd.-Sprung, siehe
+     * resolveAndCachePtsOffset()). Dieses Flag laesst FFmpeg als korrupt
+     * erkannte Pakete selbst verwerfen, bevor sie die eigene PTS-Logik
+     * erreichen. Wird laut hls.c:2367 (pls->ctx->flags |= s->flags &
+     * ~AVFMT_FLAG_CUSTOM_IO) zuverlaessig an die inneren HLS-Sub-Kontexte
+     * weitergereicht. */
+    avContextTab[AVIdx]->flags = AVFMT_FLAG_GENPTS | AVFMT_FLAG_DISCARD_CORRUPT;
 
     /* Preselection is now handled natively in FFmpeg's hls.c using dictionary options */
 
@@ -2328,9 +3171,9 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
              * so set it by default to NULL!
              */
             memset(&track, 0, sizeof(track));
-            track.AVIdx = cAVIdx; 
+            track.AVIdx = cAVIdx;
 
-            switch (get_codecpar(stream)->codec_type) 
+            switch (get_codecpar(stream)->codec_type)
             {
             case AVMEDIA_TYPE_VIDEO:
                 ffmpeg_printf(10, "CODEC_TYPE_VIDEO %d\n", get_codecpar(stream)->codec_type);
@@ -2396,11 +3239,19 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     track.stream    = stream;
                     track.Id        = ((AVStream *) (track.stream))->id;
 
-                    track.duration = (int64_t)av_rescale(stream->duration, (int64_t)stream->time_base.num * 1000, stream->time_base.den); 
-                    if(stream->duration == AV_NOPTS_VALUE || 0 == strncmp(avContext->iformat->name, "dash", 4)) 
+                    track.duration = (int64_t)av_rescale(stream->duration, (int64_t)stream->time_base.num * 1000, stream->time_base.den);
+                    if(stream->duration == AV_NOPTS_VALUE || 0 == strncmp(avContext->iformat->name, "dash", 4))
                     {
                         ffmpeg_printf(10, "Stream has no duration so we take the duration from context\n");
-                        track.duration = (int64_t) avContext->duration / 1000;
+                        /* Ist auch avContext->duration unbekannt (echte Live-Streams ohne
+                         * jede Laengenangabe, z.B. eine reine Webcam-URL), ist das selbst
+                         * AV_NOPTS_VALUE (INT64_MIN). Ohne diese Absicherung wird daraus
+                         * durch die Division ein riesiger, aber nicht mehr als ungueltig
+                         * erkennbarer negativer Wert (in container_ffmpeg_get_length()
+                         * nochmal durch 1000 geteilt), der als PLAYBACK_LENGTH an
+                         * serviceapp/Enigma2 durchgereicht wird -- dort blieb dadurch
+                         * die Zeitanzeige trotz laufender Wiedergabe auf 0:00 stehen. */
+                        track.duration = (AV_NOPTS_VALUE == avContext->duration) ? 0 : (int64_t) avContext->duration / 1000;
                     }
                     
                     if (context->manager->video)
@@ -2455,27 +3306,73 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     if(stream->duration == AV_NOPTS_VALUE) 
                     {
                         ffmpeg_printf(10, "Stream has no duration so we take the duration from context\n");
-                        track.duration = (int64_t) avContext->duration / 1000;
+                        track.duration = (AV_NOPTS_VALUE == avContext->duration) ? 0 : (int64_t) avContext->duration / 1000;
                     }
                     
                     if(!strncmp(encoding, "A_IPCM", 6) || !strncmp(encoding, "A_LPCM", 6))
                     {
                         track.inject_as_pcm = 1;
-                        track.avCodecCtx = wrapped_avcodec_get_context(cAVIdx, stream);
-                        if (track.avCodecCtx)
+
+                        /* container_ffmpeg_update_tracks() wird nicht nur einmal beim
+                         * Start aufgerufen, sondern bei JEDER GUI-Trackabfrage erneut
+                         * (MANAGER_LIST -> hier mit initial=0), z.B. durch
+                         * getCurrentTrack/getNumberOfTracks. ManagerAdd() kopiert das
+                         * Ergebnis dann per freeTrack()+copyTrack() in die AKTIVE, vom
+                         * Demux-Thread gerade benutzte Track_t-Struktur. Ein erneutes
+                         * avcodec_open2() hier tauscht den Decoder-Kontext also mitten
+                         * im laufenden Stream aus, ohne den Downstream-Resampler-
+                         * Zustand (swr/decoded_frame in FFMPEGThread) zurueckzusetzen
+                         * - das fuehrt zu Tonaussetzern/Async, voellig unabhaengig von
+                         * Ad-Splices. Ist bereits ein Track mit derselben Id aktiv,
+                         * dessen Decoder-Kontext wiederverwenden statt neu zu oeffnen. */
+                        if (!initial && currAudioTrack && currAudioTrack->Id == track.Id && currAudioTrack->avCodecCtx)
                         {
-                            ffmpeg_printf(10, " Handle inject_as_pcm = %d\n", track.inject_as_pcm);
-
-                            const AVCodec *codec = avcodec_find_decoder(get_codecpar(stream)->codec_id);
-
-                            int errorCode = avcodec_open2(track.avCodecCtx, codec, NULL);
-                            if(codec != NULL && !errorCode)
+                            track.avCodecCtx = currAudioTrack->avCodecCtx;
+                        }
+                        else
+                        {
+                            track.avCodecCtx = wrapped_avcodec_get_context(cAVIdx, stream);
+                            if (track.avCodecCtx)
                             {
-                               ffmpeg_printf(10, "AVCODEC__INIT__SUCCESS\n");
-                            }
-                            else
-                            {
-                               ffmpeg_printf(10, "AVCODEC__INIT__FAILED error[%d]\n", errorCode);
+                                ffmpeg_printf(10, " Handle inject_as_pcm = %d\n", track.inject_as_pcm);
+
+                                const AVCodec *codec = avcodec_find_decoder(get_codecpar(stream)->codec_id);
+
+                                int errorCode = avcodec_open2(track.avCodecCtx, codec, NULL);
+                                if(codec != NULL && !errorCode)
+                                {
+                                   ffmpeg_printf(10, "AVCODEC__INIT__SUCCESS\n");
+                                }
+                                else
+                                {
+                                   ffmpeg_printf(10, "AVCODEC__INIT__FAILED error[%d]\n", errorCode);
+                                }
+
+                                if (g_verbose_logging)
+                                {
+                                    FILE *arlog = fopen("/tmp/exteplayer3_audio_reinit.log", "a");
+                                    if (arlog)
+                                    {
+                                        uint8_t *ed = get_codecpar(stream)->extradata;
+                                        int edsize = get_codecpar(stream)->extradata_size;
+                                        fprintf(arlog,
+                                            "%ld AUDIO_INITIAL_OPEN codec=%s codecId=%d sampleRate=%d channels=%d "
+                                            "profile=%d extradataSize=%d extradataHead=%02x%02x%02x%02x errorCode=%d initial=%d\n",
+                                            (long)time(NULL),
+                                            codec ? codec->name : "-",
+                                            (int32_t)get_codecpar(stream)->codec_id,
+                                            get_codecpar(stream)->sample_rate,
+                                            get_codecpar(stream)->channels,
+                                            get_codecpar(stream)->profile,
+                                            edsize,
+                                            edsize > 0 ? ed[0] : 0,
+                                            edsize > 1 ? ed[1] : 0,
+                                            edsize > 2 ? ed[2] : 0,
+                                            edsize > 3 ? ed[3] : 0,
+                                            errorCode, initial);
+                                        fclose(arlog);
+                                    }
+                                }
                             }
                         }
                     }
@@ -2758,7 +3655,7 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     if(stream->duration == AV_NOPTS_VALUE) 
                     {
                         ffmpeg_printf(10, "Stream has no duration so we take the duration from context\n");
-                        track.duration = (int64_t) avContext->duration / 1000;
+                        track.duration = (AV_NOPTS_VALUE == avContext->duration) ? 0 : (int64_t) avContext->duration / 1000;
                     }
 
                     ffmpeg_printf(1, "subtitle codec %d\n", get_codecpar(stream)->codec_id);
@@ -2780,8 +3677,24 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
             case AVMEDIA_TYPE_ATTACHMENT:
             case AVMEDIA_TYPE_NB:
             default:
-                stream->discard = AVDISCARD_ALL;
-                ffmpeg_err("not handled or unknown codec_type %d\n", get_codecpar(stream)->codec_type);
+                if (get_codecpar(stream)->codec_id == AV_CODEC_ID_NONE)
+                {
+                    /* Noch nicht klassifiziert (private/proprietaere MPEG-TS
+                     * stream_type-Codes im Bereich 0x80-0xFF, wie sie manche
+                     * Live-Streams bei Werbe-Segmenten verwenden) - NICHT
+                     * verwerfen, damit FFmpegs eigener Auto-Erkennungs-
+                     * mechanismus (mpegts.c:1219, request_probe beim naechsten
+                     * PES-Paket) ueberhaupt eine Chance bekommt zu laufen.
+                     * mpegts.c:1187 ueberspringt Pakete mit
+                     * discard==AVDISCARD_ALL VOR der request_probe-Zuweisung -
+                     * sofortiges Verwerfen hat die eingebaute Bitstream-
+                     * Erkennung bisher strukturell verhindert. */
+                }
+                else
+                {
+                    stream->discard = AVDISCARD_ALL;
+                    ffmpeg_err("not handled or unknown codec_type %d\n", get_codecpar(stream)->codec_type);
+                }
              break;
             }
         } /* for */
@@ -3093,9 +4006,18 @@ static int32_t container_ffmpeg_get_length(Context_t *context, int64_t *length)
     
     *length = 0;
 
-    if (current != NULL) 
+    if (current != NULL)
     {
-        if (current->duration == 0)
+        /* current->duration <= 0 statt nur == 0: Bei manchen echten Live-
+         * Streams ohne jede Laengenangabe (z.B. reine Webcam-URLs) kann die
+         * Dauer-Berechnung weiter oben (av_rescale bzw. avContext->duration)
+         * je nach Eingabewerten einen negativen Ueberlauf statt exakt 0
+         * ergeben. Eine negative "Laenge" ist fuer einen echten Stream nie
+         * plausibel und wurde bisher unveraendert als PLAYBACK_LENGTH an
+         * serviceapp/Enigma2 durchgereicht - dort blieb die Zeitanzeige trotz
+         * laufender Wiedergabe auf 0:00 stehen, weil Enigma2 mit dem Wert
+         * nichts anfangen konnte. */
+        if (current->duration <= 0)
         {
             return cERR_CONTAINER_FFMPEG_ERR;
         }

@@ -4,6 +4,8 @@
 
 #include <fcntl.h>
 #include <stdarg.h>
+#include <glob.h>
+#include <pthread.h>
 
 /* fcntl@GLIBC_2.4 als Basis */
 extern int __compat_fcntl(int fd, int cmd, ...);
@@ -71,4 +73,90 @@ __attribute__((visibility("hidden")))
 int fstat64(int fd, void *buf)
 {
     return __compat_fxstat64(STAT_VER_LINUX, fd, (struct _compat_stat *)buf);
+}
+
+/* fmod: reiner Versions-, kein Symbolnamen-Unterschied. Die Box-libm.so.6
+   (glibc 2.21) exportiert fmod/fmodf/fmodl einheitlich unter GLIBC_2.4
+   (per objdump -T verifiziert). Der aktuell installierte Cross-Toolchain-
+   Stub (libc6-dev-armhf-cross, glibc 2.41) verlinkt beim Fehlen dieses
+   Fixes stattdessen gegen die neueste verfuegbare Version (GLIBC_2.38),
+   die auf der Box nicht existiert -> Ladefehler. */
+extern double __compat_fmod(double x, double y);
+__asm__(".symver __compat_fmod,fmod@GLIBC_2.4");
+
+__attribute__((visibility("hidden")))
+double fmod(double x, double y)
+{
+    return __compat_fmod(x, y);
+}
+
+/* hypot: dieselbe Situation wie fmod, ebenfalls GLIBC_2.4 auf der Box. */
+extern double __compat_hypot(double x, double y);
+__asm__(".symver __compat_hypot,hypot@GLIBC_2.4");
+
+__attribute__((visibility("hidden")))
+double hypot(double x, double y)
+{
+    return __compat_hypot(x, y);
+}
+
+/* glob64: reiner Versions-, kein Symbolnamen-Unterschied (Box exportiert
+   glob64 direkt unter GLIBC_2.4, per objdump -T verifiziert). */
+extern int __compat_glob64(const char *pattern, int flags,
+                            int (*errfunc)(const char *epath, int eerrno),
+                            void *pglob);
+__asm__(".symver __compat_glob64,glob64@GLIBC_2.4");
+
+__attribute__((visibility("hidden")))
+int glob64(const char *pattern, int flags,
+           int (*errfunc)(const char *epath, int eerrno), void *pglob)
+{
+    return __compat_glob64(pattern, flags, errfunc, pglob);
+}
+
+/* lstat64: wie stat/fstat oben ein Symbolnamen-, kein reines Versions-
+   problem - die Box exportiert nur die multiplexte __lxstat64-Schnittstelle
+   (GLIBC_2.4), kein direktes lstat64. */
+extern int __compat_lxstat64(int ver, const char *path, struct _compat_stat *buf);
+__asm__(".symver __compat_lxstat64,__lxstat64@GLIBC_2.4");
+
+__attribute__((visibility("hidden")))
+int lstat64(const char *path, void *buf)
+{
+    return __compat_lxstat64(STAT_VER_LINUX, path, (struct _compat_stat *)buf);
+}
+
+/* pthread_create/pthread_join/pthread_cancel: seit glibc 2.34 in libc.so
+   selbst (vorher eigenes libpthread.so.0), auf der Box (glibc 2.21) nur
+   unter GLIBC_2.4 vorhanden. Ein blosses ".symver name,name@version" ohne
+   tatsaechlichen Aufruf in dieser Datei wird vom Linker beim Bauen einer
+   Shared Library verworfen (mangels eigenem Symboltabelleneintrag) - hier
+   daher wie bei stat/fstat oben ueber echte Wrapper-Funktionen geloest,
+   nicht per direktem .symver wie in glibc_compat_pthread_time64.h (das
+   nur fuer das exteplayer3-Binary eingebunden wird). */
+extern int __compat_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                                    void *(*start_routine)(void *), void *arg);
+extern int __compat_pthread_join(pthread_t thread, void **retval);
+extern int __compat_pthread_cancel(pthread_t thread);
+__asm__(".symver __compat_pthread_create,pthread_create@GLIBC_2.4");
+__asm__(".symver __compat_pthread_join,pthread_join@GLIBC_2.4");
+__asm__(".symver __compat_pthread_cancel,pthread_cancel@GLIBC_2.4");
+
+__attribute__((visibility("hidden")))
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                    void *(*start_routine)(void *), void *arg)
+{
+    return __compat_pthread_create(thread, attr, start_routine, arg);
+}
+
+__attribute__((visibility("hidden")))
+int pthread_join(pthread_t thread, void **retval)
+{
+    return __compat_pthread_join(thread, retval);
+}
+
+__attribute__((visibility("hidden")))
+int pthread_cancel(pthread_t thread)
+{
+    return __compat_pthread_cancel(thread);
 }
