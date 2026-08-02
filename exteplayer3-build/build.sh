@@ -99,7 +99,3 @@ mkdir -p "$BUILDDIR/../release"
 ar rcs "$BUILDDIR/../release/exteplayer3_vti_1_181+git3_armv7ahf.ipk" repack/debian-binary repack/data.tar.gz repack/control.tar.gz
 echo "IPK: $(ls -lh "$BUILDDIR/../release/exteplayer3_vti_1_181+git3_armv7ahf.ipk")"
 
-echo ""
-echo "=== Installation auf Box ==="
-echo "Befehl:"
-echo "  cat repack/exteplayer3_vti_182_armv7ahf.ipk | ssh root@<BOX-IP> 'cat > /tmp/ep3.ipk && sed -i s/Version:.*/Version:\ 181/ /var/lib/opkg/status && opkg install --force-depends --force-overwrite /tmp/ep3.ipk'"
