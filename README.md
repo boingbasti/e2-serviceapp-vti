@@ -20,6 +20,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Diverse Absturz- und Speicherleck-Fixes (u. a. Reentrancy-Guard beim Streamwechsel, EPG-Cache-Absturzsicherheit)
 - Optionales Debug-Logging (standardmäßig deaktiviert, um die RAM-Disk `/tmp` nicht vollzuschreiben)
 - Automated Picon Sync für Stream-Bouquet-Einträge ohne eigenes Picon
+- Wiedergabe-Fortsetzung (Resume) und Sprungmarken für lokale Dateien via `iCueSheet`
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).

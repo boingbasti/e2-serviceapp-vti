@@ -4,6 +4,7 @@
 class Event;
 
 #include <limits>
+#include <set>
 #include <lib/service/iservice.h>
 #include <lib/base/ebase.h>
 #include <lib/base/message.h>
@@ -34,7 +35,7 @@ struct eServiceAppOptions
 
 class eServiceApp: public iPlayableService, public iPauseableService, public iServiceInformation,
 	public iSeekableService, public iAudioTrackSelection, public iAudioChannelSelection,
-	public iSubtitleOutput, public iSubserviceList
+	public iSubtitleOutput, public iSubserviceList, public iCueSheet
 {
 	DECLARE_REF(eServiceApp);
 
@@ -109,6 +110,25 @@ class eServiceApp: public iPlayableService, public iPauseableService, public iSe
 	eTimer *my_nownext_timer;
 #endif
 
+	// iCueSheet: rein lokale Marker-/Resume-Verwaltung, kein Nachbau von
+	// eDVBServicePlays cutlistToCuesheet() (DVB-Hardware-Trickplay-Skip) -
+	// exteplayer3 hat dafuer keine Entsprechung, ein Nachbau ueber
+	// Positions-Polling+Seek waere unnoetiges Risiko fuer ungefordertes
+	// Verhalten. Nur Speicherung/Anzeige der Marker, kein Auto-Skip.
+	struct cueEntry
+	{
+		pts_t where;
+		unsigned int what; // iCueSheet_ENUMS: 0=cutIn,1=cutOut,2=cutMark, 3=letzte Wiedergabeposition (undokumentiert)
+		bool operator<(const struct cueEntry &o) const { return where < o.where; }
+		cueEntry(const pts_t &where, unsigned int what): where(where), what(what) {}
+	};
+	std::multiset<cueEntry> m_cue_entries;
+	bool m_cuesheet_changed;
+	int m_cutlist_enabled;
+	bool isLocalFile() const;
+	void loadCuesheet();
+	void saveCuesheet();
+
 public:
 	eServiceApp(eServiceReference ref);
 	~eServiceApp();
@@ -131,7 +151,7 @@ public:
 	RESULT frontendInfo(ePtr<iFrontendInformation> &ptr){ ptr=0; return -1;};
 	RESULT timeshift(ePtr<iTimeshiftService> &ptr){ ptr=0; return -1;};
 	RESULT tap(ePtr<iTapService> &ptr) { ptr = nullptr; return -1; };
-	RESULT cueSheet(ePtr<iCueSheet> &ptr){ ptr=0; return -1;};
+	RESULT cueSheet(ePtr<iCueSheet> &ptr);
 	RESULT subtitle(ePtr<iSubtitleOutput> &ptr){ ptr=this; return 0;};
 	RESULT audioDelay(ePtr<iAudioDelay> &ptr){ ptr=0; return -1;};
 	RESULT rdsDecoder(ePtr<iRdsDecoder> &ptr){ ptr=0; return -1;};
@@ -152,6 +172,11 @@ public:
 	RESULT getPlayPosition(pts_t &SWIG_OUTPUT);
 	RESULT setTrickmode(int trick);
 	RESULT isCurrentlySeekable();
+
+	// iCueSheet
+	PyObject *getCutList();
+	void setCutList(SWIG_PYOBJECT(ePyObject) list);
+	void setCutListEnable(int enable);
 
 	// iAudioTrackSelection
 	int getNumberOfTracks();

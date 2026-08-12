@@ -1297,6 +1297,23 @@ static void FFMPEGThread(Context_t *context)
                         break;
                     }
                 }
+                /* resolveAndCachePtsOffset() wurde fuer Live-Stream-Diskontinuitaeten
+                 * (z.B. Werbe-Splices) gebaut und kann einen legitimen Seek nicht von
+                 * einer ungewollten Diskontinuitaet unterscheiden - ein PTS-Sprung ueber
+                 * PTS_JUMP_RELEARN_THRESHOLD loest "relearn" aus, das den Offset genau so
+                 * waehlt, dass corrected == lastGoodPts bleibt (siehe dort), der Sprung
+                 * wird also aktiv herausgerechnet und die Wiedergabe "kriecht" scheinbar
+                 * an der alten Position weiter, obwohl der Demuxer bereits korrekt an der
+                 * neuen Position liest. Reset erzwingt den "noch nie gelernt"-Zweig
+                 * (offset = sessionBasePts statt Fortsetzung von lastGoodPts);
+                 * sessionBasePts bleibt bewusst unangetastet (Datei-Start-Nullpunkt,
+                 * nicht seek-abhaengig). Betrifft nur diesen Seek-Codepfad, die
+                 * Werbesprung-Erkennung bei Live-Streams laeuft ueber denselben
+                 * Mechanismus ausserhalb eines Seek-Befehls und bleibt unberuehrt. */
+                lastGoodVideoPts = -1;
+                lastGoodAudioPts = -1;
+                memset(videoPtsOffsetCache, 0, sizeof(videoPtsOffsetCache));
+                memset(audioPtsOffsetCache, 0, sizeof(audioPtsOffsetCache));
                 reset_finish_timeout();
                 /*
                 if (bufferSize > 0)

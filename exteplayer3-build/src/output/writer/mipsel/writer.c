@@ -229,20 +229,75 @@ ssize_t write_with_retry(int fd, const void *buf, int size)
     return 0;
 }
 
-ssize_t writev_with_retry(int fd, const struct iovec *iov, int ic) 
+/* TEMP-DIAGNOSE: H264-Bildstoerungs-Untersuchung. Frueher rief diese Funktion fuer
+ * JEDES einzelne iovec-Element (PES-Header, dann pro NAL ein 4-Byte-Startcode plus
+ * die eigentlichen Slice-Daten, oft 10-20 Elemente pro Frame) einen eigenen
+ * write_with_retry()-Aufruf auf. write_with_retry() schlaeft bei jedem
+ * unvollstaendigen Schreibversuch 1ms, bevor es den Rest erneut versucht - bei
+ * vielen kleinen Elementen (v.a. die 4-Byte-Startcodes) kann sich das mehrfach pro
+ * Frame aufsummieren und bei hoher Framerate (59,94fps = ~16,7ms Budget/Frame) das
+ * Zeitbudget sprengen. Testweise auf den echten writev()-Syscall umgestellt (ein
+ * einziger Aufruf statt vieler kleiner), Kernel/Treiber setzt die Scatter-Gather-
+ * Liste selbst zusammen, kein manuelles memcpy in einen Zwischenpuffer noetig. */
+#define WRITEV_RETRY_MAX_IOV 128
+
+ssize_t writev_with_retry(int fd, const struct iovec *iov, int ic)
 {
-    ssize_t len = 0;
-    int i = 0;
-    for(i=0; i<ic; ++i)
+    if (ic <= 0)
     {
-        write_with_retry(fd, iov[i].iov_base, iov[i].iov_len); 
-        len += iov[i].iov_len;
-        if(PlaybackDieNow(0))
+        return 0;
+    }
+
+    struct iovec local_iov[WRITEV_RETRY_MAX_IOV];
+    int n = ic > WRITEV_RETRY_MAX_IOV ? WRITEV_RETRY_MAX_IOV : ic;
+    int i;
+    ssize_t total_size = 0;
+    for (i = 0; i < n; ++i)
+    {
+        local_iov[i] = iov[i];
+        total_size += iov[i].iov_len;
+    }
+    if (total_size <= 0)
+    {
+        return 0;
+    }
+
+    int start = 0;
+    while (start < n && 0 == PlaybackDieNow(0))
+    {
+        ssize_t ret = writev(fd, &local_iov[start], n - start);
+        if (ret < 0)
         {
-            return -1;
+            switch (errno)
+            {
+                case EINTR:
+                case EAGAIN:
+                    usleep(1000);
+                    continue;
+                default:
+                    return -1;
+            }
+        }
+        if (ret == 0)
+        {
+            usleep(1000);
+            continue;
+        }
+
+        /* Bei Teil-Writes vollstaendig konsumierte Elemente ueberspringen und das
+         * naechste Element um den Rest verkuerzen, bevor erneut versucht wird. */
+        while (start < n && (size_t)ret >= local_iov[start].iov_len)
+        {
+            ret -= local_iov[start].iov_len;
+            start++;
+        }
+        if (start < n && ret > 0)
+        {
+            local_iov[start].iov_base = (uint8_t *)local_iov[start].iov_base + ret;
+            local_iov[start].iov_len -= (size_t)ret;
         }
     }
-    return len;
+    return total_size;
 }
 
 Writer_t* getWriter(char* encoding)

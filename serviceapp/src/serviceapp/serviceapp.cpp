@@ -1,6 +1,9 @@
 #include "Python.h"
 #include <sstream>
 #include <algorithm>
+#include <unistd.h>
+#include <endian.h>
+#include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -281,6 +284,8 @@ eServiceApp::eServiceApp(eServiceReference ref):
 	m_event_now_raw(0),
 	m_event_next_raw(0)
 #endif
+	, m_cuesheet_changed(false),
+	m_cutlist_enabled(0)
 {
 	SALOG("eServiceApp ctor: start path=%s", ref.path.c_str());
 	SALOG("eServiceApp ctor: sizeof(time_t)=%zu sizeof(timespec)=%zu", sizeof(time_t), sizeof(timespec));
@@ -828,6 +833,11 @@ void eTimer::startLongTimer(int seconds)
 RESULT eServiceApp::start()
 {
 	SALOG("eServiceApp::start: ENTER");
+	// Muss lange vor dem asynchronen PlayerMessage::start/evStart geladen sein,
+	// da InfoBarCueSheetSupport.__serviceStarted() synchron an evStart haengt
+	// und sofort getCutList() abfragt. Braucht nur die Datei von der Platte,
+	// keine Player-Position - kein Warten auf den Player noetig.
+	if (isLocalFile()) loadCuesheet();
 	std::string path_str(m_ref.path);
 	HeaderMap headers = getHeaders(m_ref.path);
 	if (options->HLSExplorer && options->autoSelectStream)
@@ -911,6 +921,39 @@ RESULT eServiceApp::stop()
 	if (my_subtitle_sync_timer) my_subtitle_sync_timer->stop();
 	if (my_event_updated_info_timer) my_event_updated_info_timer->stop();
 	if (my_nownext_timer) my_nownext_timer->stop();
+
+	// Resume-Bookmark: letzte Wiedergabeposition als Typ-3-Eintrag speichern,
+	// bevor player->stop() die IPC-Verbindung beendet (danach schlagen
+	// getPlayPosition()/getLength() fehl). Bit 2 von m_cutlist_enabled ist
+	// das "nicht merken"-Flag (analog eDVBServicePlay::stop()).
+	if (isLocalFile() && ((m_cutlist_enabled & 2) == 0))
+	{
+		pts_t play_position, length;
+		if (getPlayPosition(play_position) == 0)
+		{
+			for (std::multiset<cueEntry>::iterator i(m_cue_entries.begin()); i != m_cue_entries.end();)
+			{
+				if (i->what == 3)
+				{
+					m_cue_entries.erase(i);
+					i = m_cue_entries.begin();
+					continue;
+				}
+				++i;
+			}
+
+			if (getLength(length) != 0)
+				length = 0;
+
+			if (length > 0)
+			{
+				m_cue_entries.insert(cueEntry(play_position, 3));
+				m_cuesheet_changed = true;
+			}
+		}
+		if (m_cuesheet_changed) saveCuesheet();
+	}
+
 	player->stop();
 	SALOG("stop: player->stop() done");
 	return 0;
@@ -953,7 +996,11 @@ RESULT eServiceApp::getLength(pts_t& pts)
 	{
 		return -1;
 	}
-	pts = length * 90;
+	// (pts_t) Cast noetig: length*90 wuerde sonst in 32-Bit int gerechnet und
+	// bei Laenge > ca. 6,6h (length > INT_MAX/90) ueberlaufen, siehe Fund beim
+	// iCueSheet-Test mit einer 8,6h-Datei (getLength lieferte dadurch <= 0,
+	// Resume-Bookmark wurde faelschlich nie geschrieben).
+	pts = (pts_t)length * 90;
 	return 0;
 }
 
@@ -1005,7 +1052,9 @@ RESULT eServiceApp::getPlayPosition(pts_t& pts)
 	{
 		return -1;
 	}
-	pts = position * 90;
+	// Gleicher 32-Bit-Overflow-Fix wie in getLength() - waere sonst nach ca.
+	// 6,6h Wiedergabeposition betroffen.
+	pts = (pts_t)position * 90;
 	return 0;
 }
 
@@ -1019,6 +1068,158 @@ RESULT eServiceApp::isCurrentlySeekable()
 {
 	eDebug("eServiceApp::isCurrentlySeekable");
 	return -1;
+}
+
+
+// __iCueSheet
+// Nur lokale Dateien bekommen ein Cue-Sheet (.cuts-Datei neben der Datei,
+// gleiches Muster wie die externe .srt-Untertitel-Erkennung). Fuer
+// Netzwerk-Streams gibt es dafuer in Enigma2 keine Konvention - dort greift
+// stattdessen automatisch der vorhandene, service-unabhaengige Python-seitige
+// ResumePoints-Fallback (InfoBarGenerics.py), der nur iSeekableService braucht.
+bool eServiceApp::isLocalFile() const
+{
+	return Url(m_ref.path).url().find("://") == std::string::npos;
+}
+
+RESULT eServiceApp::cueSheet(ePtr<iCueSheet> &ptr)
+{
+	if (isLocalFile())
+	{
+		ptr = this;
+		return 0;
+	}
+	ptr = 0;
+	return -1;
+}
+
+PyObject *eServiceApp::getCutList()
+{
+	PyObject *list = PyList_New(0);
+
+	for (std::multiset<cueEntry>::const_iterator i(m_cue_entries.begin()); i != m_cue_entries.end(); ++i)
+	{
+		PyObject *tuple = PyTuple_New(2);
+		PyTuple_SET_ITEM(tuple, 0, PyLong_FromLongLong(i->where));
+		PyTuple_SET_ITEM(tuple, 1, PyLong_FromLong(i->what));
+		PyList_Append(list, tuple);
+		Py_DECREF(tuple);
+	}
+
+	return list;
+}
+
+void eServiceApp::setCutList(SWIG_PYOBJECT(ePyObject) list)
+{
+	if (!PyList_Check(list))
+		return;
+
+	Py_ssize_t size = PyList_Size(list);
+	m_cue_entries.clear();
+
+	for (Py_ssize_t i = 0; i < size; ++i)
+	{
+		PyObject *tuple = PyList_GET_ITEM(list, i);
+		if (!PyTuple_Check(tuple) || PyTuple_Size(tuple) != 2)
+		{
+			eDebug("[eServiceApp] setCutList: skipping malformed cutlist entry");
+			continue;
+		}
+		PyObject *ppts = PyTuple_GET_ITEM(tuple, 0);
+		PyObject *ptype = PyTuple_GET_ITEM(tuple, 1);
+		if (!(PyLong_Check(ppts) && PyLong_Check(ptype)))
+		{
+			eDebug("[eServiceApp] setCutList: cutlist entries need to be (pts, type)-tuples");
+			continue;
+		}
+		pts_t pts = PyLong_AsLongLong(ppts);
+		int type = PyLong_AsLong(ptype);
+		m_cue_entries.insert(cueEntry(pts, type));
+	}
+	m_cuesheet_changed = true;
+
+	if (m_has_event_slot) m_event_slot(this, evCuesheetChanged);
+}
+
+void eServiceApp::setCutListEnable(int enable)
+{
+	// Reiner Flag-Speicher (u.a. Bit 2 = "letzte Position nicht merken",
+	// ausgewertet beim Schreiben des Resume-Bookmarks in stop()). Kein
+	// automatisches Ueberspringen von Marker-Bereichen beim Abspielen -
+	// siehe Kommentar am m_cue_entries-Member in serviceapp.h.
+	m_cutlist_enabled = enable;
+}
+
+void eServiceApp::loadCuesheet()
+{
+	std::string filename = m_ref.path + ".cuts";
+
+	m_cue_entries.clear();
+
+	FILE *f = fopen(filename.c_str(), "rb");
+	if (f)
+	{
+		while (1)
+		{
+			unsigned long long where;
+			unsigned int what;
+
+			if (!fread(&where, sizeof(where), 1, f))
+				break;
+			if (!fread(&what, sizeof(what), 1, f))
+				break;
+
+			where = be64toh(where);
+			what = ntohl(what);
+
+			if (what > 3)
+				break;
+
+			m_cue_entries.insert(cueEntry(where, what));
+		}
+		fclose(f);
+		SALOG("loadCuesheet: %s has %zu entries", filename.c_str(), m_cue_entries.size());
+	}
+	else
+	{
+		SALOG("loadCuesheet: no cuts file at %s", filename.c_str());
+	}
+
+	m_cuesheet_changed = false;
+
+	if (m_has_event_slot) m_event_slot(this, evCuesheetChanged);
+}
+
+void eServiceApp::saveCuesheet()
+{
+	// nur speichern, wenn die Hauptdatei noch da/lesbar ist (analog eDVBServicePlay)
+	if (::access(m_ref.path.c_str(), R_OK) < 0)
+	{
+		SALOG("saveCuesheet: main file not readable, skipping: %s", m_ref.path.c_str());
+		return;
+	}
+
+	std::string filename = m_ref.path + ".cuts";
+
+	FILE *f = fopen(filename.c_str(), "wb");
+	if (f)
+	{
+		for (std::multiset<cueEntry>::iterator i(m_cue_entries.begin()); i != m_cue_entries.end(); ++i)
+		{
+			unsigned long long where = htobe64(i->where);
+			unsigned int what = htonl(i->what);
+			fwrite(&where, sizeof(where), 1, f);
+			fwrite(&what, sizeof(what), 1, f);
+		}
+		fclose(f);
+		SALOG("saveCuesheet: wrote %s (%zu entries)", filename.c_str(), m_cue_entries.size());
+	}
+	else
+	{
+		SALOG("saveCuesheet: could not open for writing: %s", filename.c_str());
+	}
+
+	m_cuesheet_changed = false;
 }
 
 

@@ -211,15 +211,13 @@ static int32_t PreparCodecData(unsigned char *data, unsigned int cd_len, unsigne
                     if (!memcmp(tmp+tmp_len, profile_cmp, 2))
                     {
                         uint8_t level_org = tmp[tmp_len + 3];
-                        if (level_org > 0x29)
-                        {
-                            h264_printf(10, "H264 %s profile@%d.%d patched down to 4.1!", profile_str[i], level_org / 10 , level_org % 10);
-                            tmp[tmp_len+3] = 0x29; // level 4.1
-                        }
-                        else
-                        {
-                            h264_printf(10, "H264 %s profile@%d.%d", profile_str[i], level_org / 10 , level_org % 10);
-                        }
+                        // Kein Downgrade auf Level 4.1 mehr: ein zu niedrig gemeldeter Level
+                        // laesst den Decoder mit zu wenig Makroblock-Durchsatz/Puffer planen,
+                        // obwohl der echte Bildinhalt mehr braucht - das verursacht sichtbare
+                        // Bildstoerungen bei Level->4.1-Material (z.B. 1080p60), waehrend der
+                        // Broadcom-Decoder Level 4.2 nachweislich korrekt verarbeitet (per
+                        // GstPlayer-Vergleichstest bestaetigt). Echten Level unveraendert lassen.
+                        h264_printf(10, "H264 %s profile@%d.%d", profile_str[i], level_org / 10 , level_org % 10);
                         break;
                     }
                 }
@@ -356,9 +354,9 @@ static int writeData(void* _call)
         iov[ic].iov_base  = call->data;
         iov[ic++].iov_len = call->len;
         PacketLength     += call->len;
-        
-        iov[0].iov_len = InsertPesHeader(PesHeader, -1, MPEG_VIDEO_PES_START_CODE, VideoPts, FakeStartCode);
-        
+
+        iov[0].iov_len = InsertPesHeaderWithDts(PesHeader, -1, MPEG_VIDEO_PES_START_CODE, VideoPts, call->Dts, FakeStartCode);
+
         return call->WriteV(call->fd, iov, ic);
     }
     else if (!call->private_data || call->private_size < 7 || 1 != call->private_data[0])
@@ -368,11 +366,16 @@ static int writeData(void* _call)
     }
 
     uint32_t PacketLength = 0;
-    
+
     ic = 0;
     iov[ic++].iov_base = PesHeader;
-    
-    if (!avc3)
+
+    /* Bugfix: frueher lief dieser Block bei jedem Frame (avc3 bleibt fuer normale
+     * Dateien immer 0), wodurch SPS/PPS auf JEDEM Frame neu an den Decoder ging.
+     * h265.c schuetzt dieselbe Stelle korrekt mit initialHeader - hier fehlte das.
+     * Ein wiederholt gesendetes SPS/PPS kann den Decoder zu einem Reset seiner
+     * Referenzbild-Verwaltung (DPB) und der Crop-Parameter verleiten. */
+    if (!avc3 && initialHeader)
     {
         if (CodecData)
         {
@@ -442,7 +445,7 @@ static int writeData(void* _call)
         } while ((pos + NalLengthBytes) < call->len);
         
         h264_printf (10, "<<<< PacketLength [%d]\n", PacketLength);
-        iov[0].iov_len = InsertPesHeader(PesHeader, -1, MPEG_VIDEO_PES_START_CODE, VideoPts, 0);
+        iov[0].iov_len = InsertPesHeaderWithDts(PesHeader, -1, MPEG_VIDEO_PES_START_CODE, VideoPts, call->Dts, 0);
         
         len = call->WriteV(call->fd, iov, ic);
         PacketLength += iov[0].iov_len;
