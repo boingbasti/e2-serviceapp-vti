@@ -51,6 +51,10 @@ void splitExtension(const std::string &path, std::string &basename, std::string 
 void splitPath(const std::string &path, std::string &dirpath, std::string &filename);
 int listDir(const std::string &dirpath, std::vector<std::string> *directories, std::vector<std::string> *files);
 
+// Gemeinsam von eServiceApp (Wiedergabe) und eStaticServiceAppInfo (Info ohne
+// Wiedergabe) genutzt - letztere hat keinen Zugriff auf eine eServiceApp-Instanz.
+bool isLocalFilePath(const std::string &path);
+
 #ifndef NO_UCHARDET
 int detectEncoding(const std::string &content, std::string &encoding);
 #endif

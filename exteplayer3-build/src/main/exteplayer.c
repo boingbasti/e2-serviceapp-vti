@@ -65,6 +65,7 @@ extern void        sel_program_id_set(const int32_t val);
 extern void      hls_quality_mode_set(const int32_t val);
 extern void hls_audio_default_only_set(const int32_t val);
 extern void        verbose_logging_set(const int32_t val);
+extern void       pcm_audio_export_set(const int32_t val);
 
 extern void pcm_resampling_set(int32_t val);
 extern void stereo_software_decoder_set(int32_t val);
@@ -516,10 +517,11 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
 {   
     int ret = 0;
     int c;
+    int32_t pcmAudioExportRequested = 0;
     int digit_optind = 0;
     int aopt = 0, bopt = 0;
     char *copt = 0, *dopt = 0;
-    while ( (c = getopt(argc, argv, "G:W:H:A:V:U:we3dlsrimvCa:n:x:u:c:h:o:p:P:t:9:0:1:4:5:6:7:f:b:F:S:O:T:L:Q:D:g:")) != -1)
+    while ( (c = getopt(argc, argv, "G:W:H:A:V:U:we3dlsrimvCa:n:x:u:c:h:o:p:P:t:9:0:1:4:5:6:7:f:b:F:S:O:T:L:Q:D:g:K")) != -1)
     {
         switch (c) 
         {
@@ -610,6 +612,11 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
         case 'g':
             printf("Verbose diagnostic logging: %d\n", atoi(optarg));
             verbose_logging_set(atoi(optarg));
+            break;
+        case 'K':
+            printf("PCM audio export via FIFO enabled\n");
+            pcm_audio_export_set(1);
+            pcmAudioExportRequested = 1;
             break;
         case 't':
             *pAudioTrackIdx = atoi(optarg);
@@ -717,8 +724,29 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
             ret = -1;
         }
     }
-    
-    if (0 == ret && optind < argc) 
+
+    if (pcmAudioExportRequested)
+    {
+        /* Der PCM-Export liefert nur Daten, wenn exteplayer3 das jeweilige
+         * Audioformat tatsaechlich selbst decodiert. Im Standard-Passthrough
+         * (AAC/AC3/EAC3 etc., Default fuer die meisten IPTV-Streams) geht
+         * das komprimierte Paket sonst unveraendert an die Hardware, ohne
+         * dass jemals ein PCM-Frame entsteht. Deshalb erzwingt -K
+         * Software-Decodierung fuer alle gaengigen Audioformate, unabhaengig
+         * von individuell gesetzten Passthrough-Optionen - das ist
+         * beabsichtigt, nicht optional, und wird in den Setup-Hilfetexten
+         * entsprechend kommuniziert. */
+        printf("PCM audio export requires software decoding, forcing it for all common audio codecs\n");
+        aac_software_decoder_set(1);
+        aac_latm_software_decoder_set(1);
+        ac3_software_decoder_set(1);
+        eac3_software_decoder_set(1);
+        dts_software_decoder_set(1);
+        wma_software_decoder_set(1);
+        mp3_software_decoder_set(1);
+    }
+
+    if (0 == ret && optind < argc)
     {
         playbackFiles->szFirstFile = map_inter_file_path(argv[optind]);
         printf("file: [%s]\n", playbackFiles->szFirstFile);

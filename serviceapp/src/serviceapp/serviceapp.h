@@ -213,6 +213,16 @@ class eStaticServiceAppInfo: public iStaticServiceInformation
 {
 	DECLARE_REF(eStaticServiceAppInfo);
 	friend class eServiceFactoryApp;
+	// Bewusst KEINE zusaetzlichen Member (auch keine, die nur ueber einen
+	// eigenen Konstruktor/Destruktor verwaltet werden muessten): Ein frueherer
+	// Versuch, hier einen In-Memory-Cache (std::unordered_map + pthread_mutex_t)
+	// direkt als Member unterzubringen, hat auf MIPS beim Enigma2-Shutdown
+	// einen Absturz in eServiceFactoryApp::~eServiceFactoryApp() ausgeloest
+	// (ueber die ePtr<eStaticServiceAppInfo>-Freigabe) - auf ARM unauffaellig,
+	// exakt das Muster wie bei den eConnection/eTimer-Faellen weiter oben in
+	// dieser Datei. Der FFmpeg-Laengen-Cache lebt deshalb komplett in
+	// ffprobe/ffprobe_length.cpp als eigener statischer Zustand, unabhaengig
+	// vom Objekt-Layout dieser Klasse.
 	eStaticServiceAppInfo(){};
 public:
 	RESULT getName(const eServiceReference &ref, std::string &name);

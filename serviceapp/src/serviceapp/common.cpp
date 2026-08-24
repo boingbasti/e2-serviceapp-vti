@@ -122,6 +122,11 @@ void Url::parseUrl(std::string url)
     m_path = path;
 }
 
+bool isLocalFilePath(const std::string &path)
+{
+    return Url(path).url().find("://") == std::string::npos;
+}
+
 void splitExtension(const std::string &path, std::string &basename, std::string &extension)
 {
     size_t filename_idx = path.find_last_of('/');

@@ -13,6 +13,7 @@ struct ExtEplayer3Options
 	int hlsQualityMode; /* 0 = auto, 1 = lowest, 2 = highest */
 	bool hlsAudioDefaultOnly;
 	bool debugLoggingEnabled;
+	bool pcmAudioExportEnabled;
 	ExtEplayer3Options():
 		aacSwDecoding(false),
 		dtsSwDecoding(false),
@@ -21,7 +22,8 @@ struct ExtEplayer3Options
 		downmix(false),
 		hlsQualityMode(0),
 		hlsAudioDefaultOnly(false),
-		debugLoggingEnabled(false) {};
+		debugLoggingEnabled(false),
+		pcmAudioExportEnabled(false) {};
 };
 
 class ExtEplayer3: public PlayerApp, public BasePlayer

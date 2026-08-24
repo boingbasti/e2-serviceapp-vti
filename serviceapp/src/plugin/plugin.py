@@ -183,6 +183,7 @@ for key in config_serviceapp.exteplayer3.keys():
     config_serviceapp.exteplayer3[key].hls_quality_mode = ConfigSelection(default=("highest" if key == "serviceexteplayer3" else "auto"),
         choices=[("auto", _("Auto (first in playlist)")), ("lowest", _("Lowest")), ("highest", _("Highest"))])
     config_serviceapp.exteplayer3[key].hls_audio_default_only = ConfigBoolean(default = True)
+    config_serviceapp.exteplayer3[key].pcm_audio_export = ConfigBoolean(default = False)
 
 
 def key_to_setting_id(key):
@@ -241,10 +242,12 @@ def init_serviceapp_settings():
         downmix        = player_cfg.downmix.value
         hls_quality_mode = {"auto": 0, "lowest": 1, "highest": 2}.get(player_cfg.hls_quality_mode.value, 0)
         hls_audio_default_only = player_cfg.hls_audio_default_only.value
+        pcm_audio_export = player_cfg.pcm_audio_export.value
 
         serviceapp_client.setExtEplayer3Settings(setting_id, aac_swdecoding,
                 dts_swdecoding, wma_swdecoding, lpcm_injecion, downmix,
-                hls_quality_mode, hls_audio_default_only, debug_logging)
+                hls_quality_mode, hls_audio_default_only, debug_logging,
+                pcm_audio_export)
 
     if config_serviceapp.servicemp3.player.value == "gstplayer":
         serviceapp_client.setServiceMP3GstPlayer()
@@ -312,6 +315,8 @@ class ServiceAppSettings(ConfigListScreen, Screen):
             exteplayer3_options_cfg.hls_quality_mode, _("Which HLS variant exteplayer3 should start with, when it parses the master playlist itself.")))
         config_list.append(getConfigListEntry("  " + _("HLS default audio only"),
             exteplayer3_options_cfg.hls_audio_default_only, _("Only keep the DEFAULT=YES audio rendition per HLS audio group, when exteplayer3 parses the master playlist itself.")))
+        config_list.append(getConfigListEntry("  " + _("PCM audio export for third-party plugins"),
+            exteplayer3_options_cfg.pcm_audio_export, _("Writes decoded PCM audio to /tmp/exteplayer3_pcm_audio.fifo. Forces software decoding for common audio formats.")))
         return config_list
 
     def serviceapp_options(self, serviceapp_options_cfg):

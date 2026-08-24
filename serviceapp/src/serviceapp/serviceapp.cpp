@@ -1,3 +1,10 @@
+// stat64()/struct stat64/off64_t explizit verfuegbar machen: der Build setzt
+// _FILE_OFFSET_BITS=32, wodurch das normale stat() bei Dateien >2GiB mit
+// EOVERFLOW fehlschlaegt (real aufgetreten bei sTimeCreate/sFileSize/
+// getFileSize unten fuer 6GB+-Dateien). _LARGEFILE64_SOURCE ist unabhaengig
+// von _FILE_OFFSET_BITS und ergaenzt nur die *64-Varianten, ohne bestehendes
+// Verhalten zu aendern.
+#define _LARGEFILE64_SOURCE
 #include "Python.h"
 #include <sstream>
 #include <algorithm>
@@ -6,6 +13,8 @@
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+
+#include "ffprobe/ffprobe_length.h"
 
 #include <lib/service/service.h>
 #include <lib/components/file_eraser.h>
@@ -947,6 +956,16 @@ RESULT eServiceApp::stop()
 
 			if (length > 0)
 			{
+				// Nach echtem Dateiende laeuft der vom Hardware-Decoder gemeldete
+				// PLAYBACK_PTS frei weiter (kein neues Material mehr, das die interne
+				// Uhr korrigieren koennte), statt am Dateiende einzufrieren - bei einem
+				// Test bis zu einem Vielfachen der tatsaechlichen Laenge beobachtet.
+				// Ohne diese Kappung wuerde ein nach Fertigschauen gespeicherter
+				// Resume-Punkt weit ueber der Laenge liegen; die GUI (Fortschrittsbalken
+				// in Filmliste/Moviewall) wertet so einen Wert offenbar als ungueltig
+				// und zeigt stattdessen "gerade erst begonnen" statt "fertig gesehen".
+				if (play_position > length)
+					play_position = length;
 				m_cue_entries.insert(cueEntry(play_position, 3));
 				m_cuesheet_changed = true;
 			}
@@ -1079,7 +1098,7 @@ RESULT eServiceApp::isCurrentlySeekable()
 // ResumePoints-Fallback (InfoBarGenerics.py), der nur iSeekableService braucht.
 bool eServiceApp::isLocalFile() const
 {
-	return Url(m_ref.path).url().find("://") == std::string::npos;
+	return isLocalFilePath(m_ref.path);
 }
 
 RESULT eServiceApp::cueSheet(ePtr<iCueSheet> &ptr)
@@ -1688,9 +1707,20 @@ RESULT eStaticServiceAppInfo::getName(const eServiceReference &ref, std::string 
 	return 0;
 }
 
+// Liefert die reale Laufzeit einer Datei OHNE sie abzuspielen (z.B. fuer
+// Movie-Wall-Ansichten von Drittanbieter-Plugins wie Advanced Event Library,
+// die dafuer eigenstaendig iStaticServiceInformation::getLength() abfragen -
+// unabhaengig vom .cuts-Resume-Mechanismus, der nur waehrend/nach aktiver
+// Wiedergabe befuellt wird). Netzwerk-Streams bleiben unterstuetzt-NA (-1),
+// gleiches Muster wie beim iCueSheet-Feature. Caching passiert komplett in
+// ffprobe_get_duration_seconds() selbst (siehe ffprobe/ffprobe_length.cpp) -
+// bewusst NICHT als Member dieser Klasse, siehe Kommentar in serviceapp.h.
 int eStaticServiceAppInfo::getLength(const eServiceReference &ref)
 {
-	return -1;
+	if (!isLocalFilePath(ref.path))
+		return -1;
+
+	return (int)ffprobe_get_duration_seconds(ref.path);
 }
 
 int eStaticServiceAppInfo::getInfo(const eServiceReference &ref, int w)
@@ -1699,8 +1729,8 @@ int eStaticServiceAppInfo::getInfo(const eServiceReference &ref, int w)
 	{
 	case iServiceInformation::sTimeCreate:
 		{
-			struct stat s;
-			if (stat(ref.path.c_str(), &s) == 0)
+			struct stat64 s;
+			if (stat64(ref.path.c_str(), &s) == 0)
 			{
 				return s.st_mtime;
 			}
@@ -1708,8 +1738,8 @@ int eStaticServiceAppInfo::getInfo(const eServiceReference &ref, int w)
 		break;
 	case iServiceInformation::sFileSize:
 		{
-			struct stat s;
-			if (stat(ref.path.c_str(), &s) == 0)
+			struct stat64 s;
+			if (stat64(ref.path.c_str(), &s) == 0)
 			{
 				return s.st_size;
 			}
@@ -1721,8 +1751,8 @@ int eStaticServiceAppInfo::getInfo(const eServiceReference &ref, int w)
 
 long long eStaticServiceAppInfo::getFileSize(const eServiceReference &ref)
 {
-	struct stat s;
-	if (stat(ref.path.c_str(), &s) == 0)
+	struct stat64 s;
+	if (stat64(ref.path.c_str(), &s) == 0)
 	{
 		return s.st_size;
 	}
@@ -1921,8 +1951,9 @@ exteplayer3_set_setting(PyObject *self, PyObject *args)
 	int hlsQualityMode = 0;
 	bool hlsAudioDefaultOnly = false;
 	bool debugLoggingEnabled = false;
+	bool pcmAudioExportEnabled = false;
 
-	if (!PyArg_ParseTuple(args, "ibbbbb|ibb", &settingId, &aacSwDecoding, &dtsSwDecoding, &wmaSwDecoding, &lpcmInjection, &downmix, &hlsQualityMode, &hlsAudioDefaultOnly, &debugLoggingEnabled))
+	if (!PyArg_ParseTuple(args, "ibbbbb|ibbb", &settingId, &aacSwDecoding, &dtsSwDecoding, &wmaSwDecoding, &lpcmInjection, &downmix, &hlsQualityMode, &hlsAudioDefaultOnly, &debugLoggingEnabled, &pcmAudioExportEnabled))
 		return NULL;
 
 	ExtEplayer3Options *options = NULL;
@@ -1956,6 +1987,7 @@ exteplayer3_set_setting(PyObject *self, PyObject *args)
 		options->hlsQualityMode = hlsQualityMode;
 		options->hlsAudioDefaultOnly = hlsAudioDefaultOnly;
 		options->debugLoggingEnabled = debugLoggingEnabled;
+		options->pcmAudioExportEnabled = pcmAudioExportEnabled;
 	}
 	return Py_BuildValue("b", ret);
 }
@@ -2047,6 +2079,7 @@ static PyMethodDef serviceappMethods[] = {
 	 " hlsQualityMode - optional, (0 - auto, 1 - lowest, 2 - highest), default 0\n"
 	 " hlsAudioDefaultOnly - optional, (True, False), default False\n"
 	 " debugLoggingEnabled - optional, (True, False), default False\n"
+	 " pcmAudioExportEnabled - optional, (True, False), default False - writes decoded PCM audio to /tmp/exteplayer3_pcm_audio.fifo for third-party plugins, forces software decoding (CPU cost)\n"
 	},
 	{"serviceapp_set_setting", serviceapp_set_setting, METH_VARARGS,
 	 "set serviceapp settings (setting_id, HLSExplorer, autoSelectStream, connectionSpeedInKb, autoTurnOnSubtitles\n\n"

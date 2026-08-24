@@ -62,6 +62,36 @@ int fstat64(int fd, void *buf)
     return __compat_fxstat64(STAT_VER_LINUX, fd, (struct _compat_stat *)buf);
 }
 
+/* lstat64: wie stat/fstat oben ein Symbolnamen-, kein reines Versionsproblem -
+   die Box exportiert nur die multiplexte __lxstat64-Schnittstelle
+   (GLIBC_2.2, analog zu __xstat64/__fxstat64 oben), kein direktes lstat64
+   (per objdump -T gegen die echte Solo2-Box-libc.so.6 bestaetigt - dort
+   ueberhaupt kein Symbol namens lstat64 vorhanden). Gefunden beim
+   LD_BIND_NOW-Test nach dem exp2/log2-Fix (siehe unten). */
+extern int __compat_lxstat64(int ver, const char *path, struct _compat_stat *buf);
+__asm__(".symver __compat_lxstat64,__lxstat64@GLIBC_2.2");
+
+__attribute__((visibility("hidden")))
+int lstat64(const char *path, void *buf)
+{
+    return __compat_lxstat64(STAT_VER_LINUX, path, (struct _compat_stat *)buf);
+}
+
+/* glob64: reiner Versions-, kein Symbolnamen-Unterschied (Box exportiert
+   glob64 direkt, aber nur unter GLIBC_2.2, nicht GLIBC_2.0 - per objdump -T
+   bestaetigt, analog zum ARM-Pendant dort allerdings GLIBC_2.4). */
+extern int __compat_glob64(const char *pattern, int flags,
+                            int (*errfunc)(const char *epath, int eerrno),
+                            void *pglob);
+__asm__(".symver __compat_glob64,glob64@GLIBC_2.2");
+
+__attribute__((visibility("hidden")))
+int glob64(const char *pattern, int flags,
+           int (*errfunc)(const char *epath, int eerrno), void *pglob)
+{
+    return __compat_glob64(pattern, flags, errfunc, pglob);
+}
+
 /*
  * Ersetzt libgccs __bswapsi2: Debians mipsel-linux-gnu-libgcc.a ist für die
  * mips32r2-Baseline vorkompiliert und nutzt dort wsbh/rotr (MIPS32r2-only,
@@ -220,4 +250,64 @@ uint64_t __fixunssfdi(float x)
         int rshift = -shift;
         return (rshift >= 64) ? 0 : (m >> rshift);
     }
+}
+
+/* exp2/exp2f/log2/log2f/log2l: kein Versions-, sondern ein Symbol-Problem wie
+   bei fstat64/stat64 oben - auf MIPS erst in GLIBC_2.2 eingefuehrt (exp2l erst
+   in GLIBC_2.4), von patch_glibc_version.py aber pauschal auf GLIBC_2.0
+   heruntergepatcht (per objdump -T gegen die echte Solo2-Box-libm.so.6
+   bestaetigt: exp2/exp2f/log2/log2f@GLIBC_2.2, exp2l@GLIBC_2.4). Ohne diese
+   Wrapper schlaegt jeder Aufruf, der lazy binding umgeht (z.B. RTLD_NOW bei
+   dlopen aus Enigma2 heraus, oder LD_BIND_NOW=1), mit einem Relocation-Fehler
+   fehl - reproduziert auch bei exteplayer3 selbst. Alle anderen von FFmpeg auf
+   MIPS genutzten math.h-Symbole liegen bereits korrekt bei GLIBC_2.0, geprueft
+   gegen die vollstaendige Liste der von libavutil/libavcodec/libavformat
+   benoetigten *UND*-Symbole. Hidden visibility wie alle anderen Wrapper hier,
+   damit keine Kollisionen zwischen den Libraries entstehen. */
+extern double __compat_exp2(double);
+__asm__(".symver __compat_exp2,exp2@GLIBC_2.2");
+__attribute__((visibility("hidden")))
+double exp2(double x)
+{
+    return __compat_exp2(x);
+}
+
+extern float __compat_exp2f(float);
+__asm__(".symver __compat_exp2f,exp2f@GLIBC_2.2");
+__attribute__((visibility("hidden")))
+float exp2f(float x)
+{
+    return __compat_exp2f(x);
+}
+
+extern long double __compat_exp2l(long double);
+__asm__(".symver __compat_exp2l,exp2l@GLIBC_2.4");
+__attribute__((visibility("hidden")))
+long double exp2l(long double x)
+{
+    return __compat_exp2l(x);
+}
+
+extern double __compat_log2(double);
+__asm__(".symver __compat_log2,log2@GLIBC_2.2");
+__attribute__((visibility("hidden")))
+double log2(double x)
+{
+    return __compat_log2(x);
+}
+
+extern float __compat_log2f(float);
+__asm__(".symver __compat_log2f,log2f@GLIBC_2.2");
+__attribute__((visibility("hidden")))
+float log2f(float x)
+{
+    return __compat_log2f(x);
+}
+
+extern long double __compat_log2l(long double);
+__asm__(".symver __compat_log2l,log2l@GLIBC_2.2");
+__attribute__((visibility("hidden")))
+long double log2l(long double x)
+{
+    return __compat_log2l(x);
 }

@@ -57,6 +57,6 @@ def setServiceAppSettings(settingId, HLSExplorer, autoSelectStream, connectionSp
 def setGstreamerPlayerSettings(settingId, videoSink, audioSink, subtitleEnabled, bufferSize, bufferDuration):
 	return serviceapp.gstplayer_set_setting(settingId, videoSink, audioSink, subtitleEnabled, bufferSize, bufferDuration)
 
-def setExtEplayer3Settings(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode=0, hlsAudioDefaultOnly=False, debugLoggingEnabled=False):
-	return serviceapp.exteplayer3_set_setting(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode, hlsAudioDefaultOnly, debugLoggingEnabled)
+def setExtEplayer3Settings(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode=0, hlsAudioDefaultOnly=False, debugLoggingEnabled=False, pcmAudioExportEnabled=False):
+	return serviceapp.exteplayer3_set_setting(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode, hlsAudioDefaultOnly, debugLoggingEnabled, pcmAudioExportEnabled)
 

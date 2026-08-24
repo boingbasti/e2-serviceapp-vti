@@ -83,6 +83,8 @@ std::vector<std::string> ExtEplayer3::buildCommand()
 		args.push_back("-g");
 		args.push_back("1");
 	}
+	if (mPlayerOptions.pcmAudioExportEnabled)
+		args.push_back("-K");
 	return args;
 }
 int ExtEplayer3::start(eMainloop *context)

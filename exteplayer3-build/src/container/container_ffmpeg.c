@@ -42,6 +42,7 @@
 #include <pthread.h>
 #include <sys/prctl.h>
 #include <stdint.h>
+#include <signal.h>
 
 #include <libavutil/avutil.h>
 #include <libavutil/time.h>
@@ -374,6 +375,113 @@ void pcm_resampling_set(const int32_t val)
 void mp3_software_decoder_set(const int32_t val)
 {
     mp3_software_decode = val;
+}
+
+/* PCM-Audio-Export: schreibt bereits dekodiertes PCM-Audio zusaetzlich in
+ * eine feste Named Pipe, damit Drittanbieter-Plugins (z.B. Live-Untertitel
+ * per Spracherkennung) live mitlesen koennen, ohne selbst eine zweite
+ * Verbindung zum Stream aufzumachen oder eigene Demux-/Sync-Logik zu bauen.
+ * Rein opt-in (Default aus), da echte CPU-Mehrlast durch erzwungene
+ * Software-Decodierung (siehe main() in exteplayer.c). Muss die normale
+ * Wiedergabe unter allen Umstaenden unbeeinflusst lassen, auch ganz ohne
+ * Leser an der Pipe - daher ausschliesslich nicht-blockierende Syscalls
+ * im Hot Path, kein zusaetzlicher Thread, keine Locks. */
+#define PCM_AUDIO_EXPORT_FIFO_PATH "/tmp/exteplayer3_pcm_audio.fifo"
+#define PCM_AUDIO_EXPORT_RECONNECT_INTERVAL_US (2 * 1000 * 1000)
+#define PCM_AUDIO_EXPORT_MAGIC 0x504D4341u /* "ACMP" little-endian = "PCMA" */
+#define PCM_AUDIO_EXPORT_MAX_FRAME_BYTES (64 * 1024)
+
+static int32_t g_pcm_audio_export_enabled = 0;
+static int g_pcm_audio_export_fd = -1;
+static int64_t g_pcm_audio_export_last_open_attempt_us = 0;
+
+#pragma pack(push, 1)
+struct PcmAudioExportHeader
+{
+    uint32_t magic;
+    uint32_t sample_rate;
+    uint16_t channels;
+    uint16_t bits_per_sample;
+    uint32_t payload_len;
+};
+#pragma pack(pop)
+
+void pcm_audio_export_set(const int32_t val)
+{
+    g_pcm_audio_export_enabled = val;
+
+    if (val)
+    {
+        /* Ohne diese Absicherung wuerde ein write() auf die FIFO, sobald der
+         * Leser weggeht (EPIPE), den kompletten Wiedergabeprozess per
+         * Default-Signal-Disposition terminieren. Nur gesetzt, wenn das
+         * Feature tatsaechlich aktiv ist - kein anderer Codepfad in diesem
+         * Prozess verlaesst sich auf SIGPIPE-Default-Verhalten. */
+        signal(SIGPIPE, SIG_IGN);
+
+        if (mkfifo(PCM_AUDIO_EXPORT_FIFO_PATH, 0666) != 0 && errno != EEXIST)
+        {
+            RAW_DEBUG_LOG("pcm_audio_export_set: mkfifo(%s) failed: %s\n",
+                           PCM_AUDIO_EXPORT_FIFO_PATH, strerror(errno));
+        }
+    }
+}
+
+int32_t pcm_audio_export_get(void)
+{
+    return g_pcm_audio_export_enabled;
+}
+
+static void pcm_audio_export_write(const uint8_t *pcm_data, uint32_t pcm_len, uint32_t sample_rate, uint16_t channels)
+{
+    if (!g_pcm_audio_export_enabled || pcm_len == 0)
+        return;
+
+    if (g_pcm_audio_export_fd < 0)
+    {
+        int64_t now = av_gettime();
+        if (now - g_pcm_audio_export_last_open_attempt_us < PCM_AUDIO_EXPORT_RECONNECT_INTERVAL_US)
+            return; /* kuerzlich schon erfolglos versucht, kein Syscall-Sturm ohne Leser */
+
+        g_pcm_audio_export_last_open_attempt_us = now;
+        /* O_NONBLOCK auf einer Named Pipe blockiert lt. POSIX fifo(7) nie -
+         * ohne Leser schlaegt open() sofort mit ENXIO fehl. */
+        g_pcm_audio_export_fd = open(PCM_AUDIO_EXPORT_FIFO_PATH, O_WRONLY | O_NONBLOCK);
+        if (g_pcm_audio_export_fd < 0)
+            return;
+    }
+
+    if (pcm_len > PCM_AUDIO_EXPORT_MAX_FRAME_BYTES - sizeof(struct PcmAudioExportHeader))
+        return; /* Frame zu gross fuer den Scratch-Buffer, komplett verwerfen statt es mittendrin abzuschneiden */
+
+    static uint8_t scratch[PCM_AUDIO_EXPORT_MAX_FRAME_BYTES];
+    struct PcmAudioExportHeader *hdr = (struct PcmAudioExportHeader *)scratch;
+    hdr->magic = PCM_AUDIO_EXPORT_MAGIC;
+    hdr->sample_rate = sample_rate;
+    hdr->channels = channels;
+    hdr->bits_per_sample = 16;
+    hdr->payload_len = pcm_len;
+    memcpy(scratch + sizeof(struct PcmAudioExportHeader), pcm_data, pcm_len);
+
+    ssize_t written = write(g_pcm_audio_export_fd, scratch, sizeof(struct PcmAudioExportHeader) + pcm_len);
+    if (written < 0)
+    {
+        if (errno == EPIPE)
+        {
+            /* Leser ist weg - schliessen und sofortigen Reconnect-Versuch
+             * erlauben, da sich der Zustand nachweislich geaendert hat. */
+            close(g_pcm_audio_export_fd);
+            g_pcm_audio_export_fd = -1;
+            g_pcm_audio_export_last_open_attempt_us = 0;
+        }
+        /* EAGAIN/EWOULDBLOCK (Puffer voll, Leser zu langsam): Frame
+         * verwerfen, kein Retry-Loop im Hot Path. */
+    }
+    /* Eine Teilschreibung (0 < written < Gesamtlaenge) wird akzeptiert und
+     * NICHT nachgeschrieben - PCM-Frames sind oft groesser als PIPE_BUF,
+     * ein zweiter write()-Call im Hot Path waere zusaetzliche Blockier-
+     * Flaeche. Der Leser muss laut Dokumentation auf die naechste
+     * Magic-Sequenz resynchronisieren koennen. */
 }
 
 void rtmp_proto_impl_set(const int32_t val)
@@ -2079,6 +2187,8 @@ static void FFMPEGThread(Context_t *context)
                         {
                             ffmpeg_err("writing data to audio device failed\n");
                         }
+                        pcm_audio_export_write((const uint8_t *) output[0], (uint32_t) avOut.len,
+                                               (uint32_t) pcmExtradata.sample_rate, (uint16_t) pcmExtradata.channels);
                         av_freep(&output[0]);
                     }
                 }
@@ -3844,6 +3954,15 @@ static int32_t container_ffmpeg_stop(Context_t *context)
     else
     {
         RAW_DEBUG_LOG("[exteplayer3] container_ffmpeg_stop: play thread terminated cleanly\n");
+    }
+
+    if (g_pcm_audio_export_fd >= 0)
+    {
+        /* Sauberes EOF fuer einen etwaigen Leser bei regulaerem Stream-Ende,
+         * statt dass er das erst beim Prozessende implizit sieht. */
+        close(g_pcm_audio_export_fd);
+        g_pcm_audio_export_fd = -1;
+        g_pcm_audio_export_last_open_attempt_us = 0;
     }
 
     hasPlayThreadStarted = 0;

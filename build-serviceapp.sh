@@ -19,6 +19,7 @@ INCLUDES=(
     "-I${SYSROOT}/usr/include/enigma2"
     "-I${SRC}"
     "-I${SRC}/cJSON"
+    "-I${SCRIPT_DIR}/exteplayer3-build/ffmpeg-6.1.1"
 )
 
 # Flags passend zu VTi (GCC 4.9, ARM hard-float, Python 2.7, EABI v5)
@@ -79,6 +80,7 @@ CPP_SOURCES=(
     "${SRC}/myconsole.cpp"
     "${SRC}/subtitles/subtitles.cpp"
     "${SRC}/subtitles/subrip.cpp"
+    "${SRC}/ffprobe/ffprobe_length.cpp"
     "${SRC}/serviceapp.cpp"
 )
 
@@ -117,6 +119,7 @@ ${CXX} "${LDFLAGS[@]}" \
     -lssl -lcrypto \
     -luchardet \
     -lsigc-1.2 \
+    -ldl \
     -o "${OUT}/serviceapp.so" 2>&1
 
 echo ""

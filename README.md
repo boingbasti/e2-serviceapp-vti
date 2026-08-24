@@ -21,6 +21,8 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Optionales Debug-Logging (standardmäßig deaktiviert, um die RAM-Disk `/tmp` nicht vollzuschreiben)
 - Automated Picon Sync für Stream-Bouquet-Einträge ohne eigenes Picon
 - Wiedergabe-Fortsetzung (Resume) und Sprungmarken für lokale Dateien via `iCueSheet`
+- Reale Laufzeit für lokale Dateien ohne Wiedergabe (`getLength()` per FFmpeg-Probe), für Movie-Wall-artige Drittanbieter-Plugins
+- Optionaler PCM-Audio-Export für Drittanbieter-Plugins (z. B. Live-Untertitel per Spracherkennung) über eine feste Named Pipe, ohne zweite Verbindung zum Stream (Details in [docs/pcm_audio_export_documentation.md](docs/pcm_audio_export_documentation.md))
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
