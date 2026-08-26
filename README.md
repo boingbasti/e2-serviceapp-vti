@@ -23,6 +23,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Wiedergabe-Fortsetzung (Resume) und Sprungmarken für lokale Dateien via `iCueSheet`
 - Reale Laufzeit für lokale Dateien ohne Wiedergabe (`getLength()` per FFmpeg-Probe), für Movie-Wall-artige Drittanbieter-Plugins
 - Optionaler PCM-Audio-Export für Drittanbieter-Plugins (z. B. Live-Untertitel per Spracherkennung) über eine feste Named Pipe, ohne zweite Verbindung zum Stream (Details in [docs/pcm_audio_export_documentation.md](docs/pcm_audio_export_documentation.md))
+- Info-Key für Drittanbieter-Plugins, um zu erkennen, ob eine Wiedergabe gerade über ServiceApp (`exteplayer3`/`gstplayer`) oder über den nativen Player läuft
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).

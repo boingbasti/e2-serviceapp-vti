@@ -177,6 +177,7 @@ public:
 
 	virtual int start(eMainloop *context) = 0;
 	virtual bool processRunning() { return false; }
+	virtual const char *getBackendName() { return "unknown"; }
 
 };
 

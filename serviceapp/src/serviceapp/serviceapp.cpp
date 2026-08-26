@@ -1618,6 +1618,7 @@ int eServiceApp::getInfo(int w)
 	case sTagKeywords:
 	case sTagChannelMode:
 	case sUser+12:
+	case sUser+13:
 		return resIsString;
 	case sTagTrackGain:
 	case sTagTrackPeak:
@@ -1681,6 +1682,13 @@ std::string eServiceApp::getInfoString(int w)
 			return e.message;
 		return "";
 	}
+	case sUser+13:
+		// Backend-Name (exteplayer3/gstplayer). Dieser Key existiert nur
+		// bei serviceapp - fragt ein Drittanbieter-Plugin das ueber den
+		// nativen eServiceMP3 (Wiedergabemodul=Original) ab, bekommt es
+		// stattdessen resNA zurueck (kein resIsString), woran sich
+		// erkennen laesst, dass serviceapp gar nicht aktiv ist.
+		return extplayer ? extplayer->getBackendName() : "";
 	default:
 		return "";
 	}

@@ -30,6 +30,7 @@ public:
 	}
 	int start(eMainloop *context);
 	bool processRunning() { return PlayerApp::processRunning(); }
+	const char *getBackendName() { return "gstplayer"; }
 	int sendStop();
 	int sendForceStop();
 	int sendPause();

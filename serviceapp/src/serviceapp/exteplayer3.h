@@ -42,7 +42,8 @@ public:
 	}
 	int start(eMainloop *context);
 	bool processRunning() { return PlayerApp::processRunning(); }
-	
+	const char *getBackendName() { return "exteplayer3"; }
+
 	int sendStop();
 	int sendForceStop();
 	int sendPause();
