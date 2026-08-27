@@ -52,10 +52,30 @@ Depends: libc6 (>= 2.20), exteplayer3 (= 1:181+git3)
 Source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
 EOF
 
+# Laeuft ausschliesslich bei echtem "opkg remove" (verifiziert: kein Aufruf
+# bei Update/Upgrade per Dateipfad, weder bei gleicher Versionsnummer mit
+# geaendertem Inhalt noch bei einer hoeheren Versionsnummer - $1 ist dann
+# immer "remove", nie z.B. "upgrade"). Andere installierte Plugins koennen
+# von ffmpeg abhaengen und werden durch das Entfernen unbrauchbar, bis
+# ffmpeg erneut installiert wird - dieser Hinweis stammt aus einer
+# Forum-Rueckmeldung.
+cat > "${PKGDIR}/ctrl_root/postrm" << 'EOF'
+#!/bin/sh
+if [ "$1" = "remove" ]; then
+    echo ""
+    echo "Hinweis: ffmpeg wurde entfernt. Andere Plugins, die ffmpeg benoetigen,"
+    echo "funktionieren erst wieder, wenn ffmpeg erneut installiert ist:"
+    echo "  Original-Version: opkg install ffmpeg"
+    echo "  Diese Version:    alle drei IPKs aus dem ZIP erneut installieren (install.sh oder manuell)"
+    echo ""
+fi
+EOF
+chmod 755 "${PKGDIR}/ctrl_root/postrm"
+
 echo "2.0" > "${PKGDIR}/debian-binary"
 
 tar czf "${PKGDIR}/data.tar.gz"    -C "${PKGDIR}/data_root" --owner=0 --group=0 .
-tar czf "${PKGDIR}/control.tar.gz" -C "${PKGDIR}/ctrl_root" --owner=0 --group=0 ./control
+tar czf "${PKGDIR}/control.tar.gz" -C "${PKGDIR}/ctrl_root" --owner=0 --group=0 ./control ./postrm
 
 mkdir -p "${OUTDIR}"
 ar rcs "${OUTDIR}/${IPK_NAME}" \
