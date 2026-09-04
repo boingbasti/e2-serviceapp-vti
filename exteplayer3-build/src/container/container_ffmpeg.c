@@ -274,7 +274,7 @@ static int32_t mp3_software_decode = 0;
 static int32_t rtmp_proto_impl = 0; // 0 - auto, 1 - native, 2 - librtmp
 
 static int32_t g_sel_program_id = -1;
-static int32_t g_hls_quality_mode = 0; /* 0 = auto (first variant), 1 = lowest bandwidth, 2 = highest bandwidth */
+static int32_t g_hls_quality_mode = 0; /* 0 = auto (highest bandwidth, same as 2), 1 = lowest bandwidth, 2 = highest bandwidth */
 static int32_t g_hls_audio_default_only = 0; /* 1 = keep only the DEFAULT=YES audio rendition per audio group */
 
 #ifdef HAVE_FLV2MPEG4_CONVERTER
@@ -3120,10 +3120,18 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
             uint32_t n = 0;
             ffmpeg_printf(1, "cAVIdx[%d]: stream with multi programs: num of programs %d\n", cAVIdx, avContext->nb_programs);
 
-            if (g_sel_program_id <= 0 && g_hls_quality_mode != 0)
+            if (g_sel_program_id <= 0)
             {
                 /* Pick the variant with the lowest/highest advertised HLS
-                 * bandwidth instead of just the first one with a video stream. */
+                 * bandwidth instead of just the first one with a video stream.
+                 * Mode 0 (auto, no explicit -Q from the caller) is treated the
+                 * same as mode 2 (highest) below: a caller that never asked for
+                 * a specific quality almost certainly did not intend "whatever
+                 * happens to be listed first in the playlist" either - that was
+                 * only ever an implementation accident, not a deliberate choice,
+                 * and it silently picked the lowest quality for every caller
+                 * that invokes exteplayer3 directly without going through
+                 * serviceapp's own hls_quality_mode setting. */
                 AVProgram *best = NULL;
                 int64_t best_bandwidth = -1;
 
@@ -3156,7 +3164,7 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     ffmpeg_printf(1, "cAVIdx[%d]: PROGRAM ID: %d, bandwidth [%"PRId64"]\n", cAVIdx, (int32_t)p->id, bandwidth);
 
                     if (best == NULL ||
-                        (g_hls_quality_mode == 2 && bandwidth > best_bandwidth) ||
+                        (g_hls_quality_mode != 1 && bandwidth > best_bandwidth) ||
                         (g_hls_quality_mode == 1 && bandwidth < best_bandwidth))
                     {
                         best = p;
@@ -3174,36 +3182,18 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
             }
             else
             {
+                /* g_sel_program_id > 0 here (the smart bandwidth-based branch
+                 * above handles every g_sel_program_id <= 0 case now, auto
+                 * included) - an explicit caller-selected program always wins. */
                 for (n = 0; n < avContext->nb_programs && (0 == nb_stream_indexes || stream_index == NULL); n++)
                 {
                     AVProgram *p = avContext->programs[n];
-                    if (p->nb_stream_indexes)
+                    if (p->nb_stream_indexes && g_sel_program_id == p->id)
                     {
-                        if (g_sel_program_id > 0)
-                        {
-                            if (g_sel_program_id == p->id)
-                            {
-                                stream_index = p->stream_index;
-                                nb_stream_indexes = p->nb_stream_indexes;
-                                ffmpeg_printf(1, "cAVIdx[%d]: select PROGRAM ID: %d\n", cAVIdx, (int32_t)p->id);
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            uint32_t m = 0;
-                            for (m = 0; m < p->nb_stream_indexes; m++)
-                            {
-                                AVStream *s = avContext->streams[p->stream_index[m]];
-                                if (get_codecpar(s)->codec_type == AVMEDIA_TYPE_VIDEO && get_codecpar(s)->width > 0)
-                                {
-                                    ffmpeg_printf(1, "cAVIdx[%d]: PROGRAM ID: %d, width [%d]\n", cAVIdx, (int32_t)p->id, (int32_t)get_codecpar(s)->width);
-                                    stream_index = p->stream_index;
-                                    nb_stream_indexes = p->nb_stream_indexes;
-                                    break;
-                                }
-                            }
-                        }
+                        stream_index = p->stream_index;
+                        nb_stream_indexes = p->nb_stream_indexes;
+                        ffmpeg_printf(1, "cAVIdx[%d]: select PROGRAM ID: %d\n", cAVIdx, (int32_t)p->id);
+                        break;
                     }
                 }
             }
