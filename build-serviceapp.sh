@@ -81,6 +81,7 @@ CPP_SOURCES=(
     "${SRC}/subtitles/subtitles.cpp"
     "${SRC}/subtitles/subrip.cpp"
     "${SRC}/ffprobe/ffprobe_length.cpp"
+    "${SRC}/serviceapprecord.cpp"
     "${SRC}/serviceapp.cpp"
 )
 

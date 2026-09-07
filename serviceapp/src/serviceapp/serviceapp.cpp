@@ -48,6 +48,7 @@ namespace sigc {
 #include "serviceapp.h"
 #include "gstplayer.h"
 #include "exteplayer3.h"
+#include "serviceapprecord.h"
 
 /* eerror.h declares "extern int debugLvl;" for the eDebug()/eLog() macros (checked
    inline on every call when built with -DDEBUG), but the real enigma2 binary does not
@@ -248,6 +249,13 @@ RESULT eServiceFactoryApp::play(const eServiceReference &ref, ePtr<iPlayableServ
 	SALOG("play() called type=%d path=%s", ref.type, ref.path.c_str());
 	ptr = new eServiceApp(ref);
 	SALOG("play() done ptr=%p", (void*)ptr.operator->());
+	return 0;
+}
+
+RESULT eServiceFactoryApp::record(const eServiceReference &ref, ePtr<iRecordableService> &ptr)
+{
+	SALOG("record() called type=%d path=%s", ref.type, ref.path.c_str());
+	ptr = eServiceAppRecord::getOrCreate(ref);
 	return 0;
 }
 

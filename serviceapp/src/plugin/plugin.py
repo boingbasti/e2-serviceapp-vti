@@ -17,6 +17,37 @@ from enigma import eEnv, eServiceReference
 
 import serviceapp_client
 
+# On this VTi image, which reference types are eligible for recording is not
+# a monkey-patch on the raw eServiceReference class (unlike upstream
+# OpenPLi-style ServiceReference.py) - it's a plain instance method on the
+# ServiceReference wrapper class itself (confirmed by decompiling the
+# installed ServiceReference.pyo and RecordTimer.so's callers, TimerEntry.pyo
+# and TimerSanityCheck.pyo, which all call serviceref.isRecordable() on a
+# ServiceReference-wrapped object, never on a raw eServiceReference):
+#
+#   class ServiceReference(eServiceReference):
+#       def isRecordable(self):
+#           ref = self.ref
+#           return ref.flags & eServiceReference.isGroup or ref.type == eServiceReference.idDVB or ref.type == 4097 or ref.type == 8192
+#
+# Our own idServiceGstPlayer/idServiceExtEplayer3 types (5001/5002) are
+# missing there, so RecordTimerEntry() silently discards any recording
+# attempt for them before our own eServiceFactoryApp::record() is ever
+# reached. Extending the method on the ServiceReference class (not
+# eServiceReference) fixes this without touching any system file - every
+# caller looks up the method fresh on every call, none of them cache it.
+from ServiceReference import ServiceReference
+
+_orig_service_reference_is_recordable = ServiceReference.isRecordable
+
+
+def _serviceapp_is_recordable(self):
+    return _orig_service_reference_is_recordable(self) or self.ref.type in (5001, 5002)
+
+
+ServiceReference.isRecordable = _serviceapp_is_recordable
+
+
 class ServiceAppPiconSync:
     @staticmethod
     def getPiconPaths():
