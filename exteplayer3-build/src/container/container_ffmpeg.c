@@ -3198,7 +3198,77 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                 }
             }
         }
-        
+
+        /* DASH represents its adaptive bitrate variants as multiple VIDEO
+         * streams within a single program (unlike HLS's per-variant
+         * AVProgram grouping handled above), so this needs its own pass
+         * over avContext->nb_streams rather than nb_programs. Reuses the
+         * same g_hls_quality_mode setting/-Q flag as HLS above - one
+         * quality preference covers every adaptive format, see plugin.py's
+         * "HLS/DASH start quality" setup label. Mode 0 (auto, e.g. a
+         * caller like archivCZSK/e2iplayer that never passes -Q) is
+         * treated the same as mode 2 (highest), matching the HLS behavior.
+         *
+         * Hardware-decoder protection: this box's H.264 decoder is capped
+         * at 1080p60 (Level 4.2) - 4K is only decodable via HEVC. A DASH
+         * manifest offering a UHD H.264 representation must never be
+         * selected, even under "highest quality", or the recording/
+         * playback ends up with a valid but undecodable video track
+         * (black screen, audio still plays). HEVC representations are not
+         * resolution-capped here since UHD HEVC decode does work.
+         *
+         * Only the index is determined here - the actual discard flag is
+         * set together with every other stream a few dozen lines below
+         * (the per-stream loop starting at "int32_t n = 0;"), since that
+         * loop's own "first video track wins" logic would otherwise
+         * unconditionally overwrite whatever we set here. */
+        int isDashCtx = (avContext->iformat && !strcmp(avContext->iformat->name, "dash"));
+        int32_t dashBestVideoIdx = -1;
+        if (isDashCtx)
+        {
+            int32_t n2;
+            int64_t best_bandwidth = -1;
+            int64_t best_res = -1;
+
+            for (n2 = 0; n2 < avContext->nb_streams; n2++)
+            {
+                AVStream *st = avContext->streams[n2];
+                AVCodecParameters *par = get_codecpar(st);
+                AVDictionaryEntry *bw_entry;
+                int64_t bandwidth;
+                int64_t res;
+
+                if (par->codec_type != AVMEDIA_TYPE_VIDEO || par->width <= 0)
+                    continue;
+
+                if (par->codec_id == AV_CODEC_ID_H264 && (par->width > 1920 || par->height > 1080))
+                {
+                    ffmpeg_printf(1, "cAVIdx[%d]: DASH stream %d (%dx%d H.264) exceeds hardware decoder limits, skipping\n",
+                                  cAVIdx, n2, par->width, par->height);
+                    continue;
+                }
+
+                bw_entry = av_dict_get(st->metadata, "variant_bitrate", NULL, 0);
+                bandwidth = bw_entry ? strtoll(bw_entry->value, NULL, 10) : 0;
+                res = (int64_t)par->width * par->height;
+
+                if (dashBestVideoIdx < 0 ||
+                    (g_hls_quality_mode != 1 && (bandwidth > best_bandwidth || (bandwidth == best_bandwidth && res > best_res))) ||
+                    (g_hls_quality_mode == 1 && (bandwidth < best_bandwidth || (bandwidth == best_bandwidth && res < best_res))))
+                {
+                    dashBestVideoIdx = n2;
+                    best_bandwidth = bandwidth;
+                    best_res = res;
+                }
+            }
+
+            if (dashBestVideoIdx >= 0)
+            {
+                ffmpeg_printf(1, "cAVIdx[%d]: DASH select video stream %d (hls_quality_mode=%d, bandwidth=%"PRId64", res=%"PRId64")\n",
+                              cAVIdx, dashBestVideoIdx, g_hls_quality_mode, best_bandwidth, best_res);
+            }
+        }
+
         int hlsHasDefaultAudio = 0;
         if (g_hls_audio_default_only && avContext->iformat && !strcmp(avContext->iformat->name, "hls"))
         {
@@ -3262,6 +3332,15 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                 stream->discard = AVDISCARD_ALL;
                 ffmpeg_printf(1, "cAVIdx[%d]: hls_audio_default_only: discard non-default audio stream index[%d]\n", cAVIdx, stream->index);
                 continue; // skip non-default HLS audio rendition
+            }
+
+            if (isDashCtx &&
+                get_codecpar(stream)->codec_type == AVMEDIA_TYPE_VIDEO &&
+                n != dashBestVideoIdx)
+            {
+                stream->discard = AVDISCARD_ALL;
+                ffmpeg_printf(1, "cAVIdx[%d]: DASH: discard non-selected video stream index[%d]\n", cAVIdx, stream->index);
+                continue; // skip every DASH video representation except the one chosen above
             }
 
             encoding = Codec2Encoding((int32_t)get_codecpar(stream)->codec_id, (int32_t)get_codecpar(stream)->codec_type, \

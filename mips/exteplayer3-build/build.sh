@@ -125,7 +125,7 @@ License: GPL-2.0
 Homepage: https://github.com/boingbasti/e2-serviceapp-vti
 Architecture: mips32el
 OE: exteplayer3
-Depends: libc6 (>= 2.20), libatomic1
+Depends: libc6 (>= 2.20), libatomic1, libxml2
 Source: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https
 EOF
 

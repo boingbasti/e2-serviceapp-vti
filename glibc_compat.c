@@ -8,6 +8,7 @@
 /* Force helper calls to use GLIBC_2.4 versions */
 __asm__(".symver vsscanf,vsscanf@GLIBC_2.4");
 __asm__(".symver strtol,strtol@GLIBC_2.4");
+__asm__(".symver strtoll,strtoll@GLIBC_2.4");
 __asm__(".symver __xstat,__xstat@GLIBC_2.4");
 
 /* __isoc23_sscanf (GLIBC_2.38): C23 sscanf — wrap via vsscanf@GLIBC_2.4 */
@@ -25,6 +26,15 @@ int __isoc23_sscanf(const char *s, const char *fmt, ...)
 long __isoc23_strtol(const char *nptr, char **endptr, int base)
 {
     return strtol(nptr, endptr, base);
+}
+
+/* __isoc23_strtoll (GLIBC_2.38): C23 strtoll — delegate to strtoll@GLIBC_2.4.
+   Same redirect mechanism as __isoc23_strtol above, just for the 64-bit
+   variant - needed as soon as any code in this .so calls strtoll() directly
+   (first hit: parsing DASH "variant_bitrate" values in ffprobe_length.cpp). */
+long long __isoc23_strtoll(const char *nptr, char **endptr, int base)
+{
+    return strtoll(nptr, endptr, base);
 }
 
 /* stat/stat64 (GLIBC_2.33): in glibc 2.21 these are inlines over __xstat/__xstat64.

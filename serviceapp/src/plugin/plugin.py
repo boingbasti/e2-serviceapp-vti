@@ -342,8 +342,8 @@ class ServiceAppSettings(ConfigListScreen, Screen):
             exteplayer3_options_cfg.downmix, _("Turn on downmix to stereo, when software decoding is in use")))
         config_list.append(getConfigListEntry("  " + _("LPCM injection"),
             exteplayer3_options_cfg.lpcm_injecion, _("Software decoder use LPCM for injection (otherwise wav PCM will be used)")))
-        config_list.append(getConfigListEntry("  " + _("HLS start quality"),
-            exteplayer3_options_cfg.hls_quality_mode, _("Which HLS variant exteplayer3 should start with, when it parses the master playlist itself.")))
+        config_list.append(getConfigListEntry("  " + _("HLS/DASH start quality"),
+            exteplayer3_options_cfg.hls_quality_mode, _("Which HLS/DASH variant exteplayer3 should start with, when it parses the manifest/playlist itself.")))
         config_list.append(getConfigListEntry("  " + _("HLS default audio only"),
             exteplayer3_options_cfg.hls_audio_default_only, _("Only keep the DEFAULT=YES audio rendition per HLS audio group, when exteplayer3 parses the master playlist itself.")))
         config_list.append(getConfigListEntry("  " + _("PCM audio export for third-party plugins"),

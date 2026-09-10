@@ -48,17 +48,17 @@ License: GPL-2.0
 Architecture: ${ARCH}
 OE: ffmpeg
 Homepage: https://www.ffmpeg.org/
-Depends: libc6 (>= 2.20), exteplayer3 (= 1:181+git3)
+Depends: libc6 (>= 2.20), exteplayer3 (= 1:181+git3), libxml2
 Source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
 EOF
 
-# Laeuft ausschliesslich bei echtem "opkg remove" (verifiziert: kein Aufruf
-# bei Update/Upgrade per Dateipfad, weder bei gleicher Versionsnummer mit
-# geaendertem Inhalt noch bei einer hoeheren Versionsnummer - $1 ist dann
+# Laeuft ausschliesslich bei echtem "opkg remove" (live verifiziert: kein
+# Aufruf bei Update/Upgrade per Dateipfad, weder bei gleicher Versionsnummer
+# mit geaendertem Inhalt noch bei einer hoeheren Versionsnummer - $1 ist dann
 # immer "remove", nie z.B. "upgrade"). Andere installierte Plugins koennen
-# von ffmpeg abhaengen und werden durch das Entfernen unbrauchbar, bis
-# ffmpeg erneut installiert wird - dieser Hinweis stammt aus einer
-# Forum-Rueckmeldung.
+# von ffmpeg abhaengen und werden durch das Entfernen
+# unbrauchbar, bis ffmpeg erneut installiert wird - dieser Hinweis stammt aus
+# einem Vorschlag von rdamas im Forum.
 cat > "${PKGDIR}/ctrl_root/postrm" << 'EOF'
 #!/bin/sh
 if [ "$1" = "remove" ]; then

@@ -36,7 +36,18 @@ arm-linux-gnueabihf-gcc -O2 -march=armv7-a -mfpu=neon -mfloat-abi=hard \
     -c "${BUILDDIR}/glibc_compat_ffmpeg.c" -o "${COMPAT_OBJ}"
 
 echo "=== Konfiguriere FFmpeg ==="
+# libxml2 (fuer den DASH-Demuxer): Header stammen aus einem eigenen Cross-Build
+# (2.12.9, ohne Module/Threads/HTTP-Client), das eigentliche Linker-Ziel ist
+# aber bewusst die reale, bereits im VTi-Feed installierte libxml2.so.2.9.2
+# (sysroot/usr/lib/arm/), damit zur Laufzeit auf der Box exakt dieselbe
+# Bibliothek verwendet wird, die schon da ist - libxml2 wird deshalb NICHT
+# mit ausgeliefert, sondern als opkg-Depends im ffmpeg-Paket eingetragen
+# (siehe package-ffmpeg-ipk.sh), analog zu libatomic1 auf MIPS.
+export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/arm/pkgconfig"
+export PKG_CONFIG_PATH=""
+
 ./configure \
+  --pkg-config=pkg-config \
   --prefix="${PREFIX}" \
   --enable-shared \
   --disable-static \
@@ -55,6 +66,7 @@ echo "=== Konfiguriere FFmpeg ==="
   --enable-armv6t2 \
   --disable-armv5te \
   --enable-zlib \
+  --enable-libxml2 \
   --disable-doc \
   --disable-debug \
   --disable-htmlpages \

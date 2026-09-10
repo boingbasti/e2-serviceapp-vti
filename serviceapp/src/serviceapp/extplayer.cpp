@@ -78,7 +78,14 @@ void PlayerApp::handleOutput(const std::string& mydata)
 void PlayerApp::stderrAvail(const char *data)
 {
 	std::string mydata(data);
-	SALOG("exteplayer3 stderr: %s", mydata.c_str());
+	// Der "J":{"ms":...} Positions-Heartbeat feuert waehrend der Wiedergabe
+	// etwa alle 100ms und macht damit den grossen Mehrheit des Debug-Logs
+	// aus, ohne echten Diagnosewert (reine Positionsangabe, keine Fehler-
+	// oder Zustandsaenderung) - wird hier bewusst nicht mitgeloggt, die
+	// eigentliche Verarbeitung (recvPosition() via handleOutput() unten)
+	// bleibt davon unberuehrt.
+	if (mydata.find("\"J\":{\"ms\"") == std::string::npos)
+		SALOG("exteplayer3 stderr: %s", mydata.c_str());
 	if (parseOutput == STD_ERROR)
 	{
 		handleOutput(mydata);

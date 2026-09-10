@@ -128,6 +128,11 @@ static ExtEplayer3Options g_ExtEplayer3OptionsServiceMP3;
 static ExtEplayer3Options g_ExtEplayer3OptionsServiceExt3;
 static ExtEplayer3Options g_ExtEplayer3OptionsUser;
 
+int getServiceExt3HlsQualityMode()
+{
+	return g_ExtEplayer3OptionsServiceExt3.hlsQualityMode;
+}
+
 static eServiceAppOptions g_ServiceAppOptionsServiceMP3;
 static eServiceAppOptions g_ServiceAppOptionsServiceExt3;
 static eServiceAppOptions g_ServiceAppOptionsServiceGst;
@@ -269,12 +274,10 @@ RESULT eServiceFactoryApp::offlineOperations(const eServiceReference &ref, ePtr<
 void eServiceApp::AddRef()
 {
 	++ref;
-	eDebug("eServiceApp::AddRef - DIAG this=%p ref=%d", (void*)this, (int)ref);
 }
 void eServiceApp::Release()
 {
 	int r = --ref;
-	eDebug("eServiceApp::Release - DIAG this=%p ref=%d", (void*)this, r);
 	if (!r) delete this;
 }
 
@@ -349,7 +352,6 @@ eServiceApp::eServiceApp(eServiceReference ref):
 
 eServiceApp::~eServiceApp()
 {
-	eDebug("eServiceApp::~eServiceApp - DIAG this=%p", (void*)this);
 	SALOG("~eServiceApp: start");
 	delete options;
 	SALOG("~eServiceApp: options deleted");
@@ -929,7 +931,6 @@ RESULT eServiceApp::start()
 
 RESULT eServiceApp::stop()
 {
-	eDebug("eServiceApp::stop - DIAG this=%p ref=%d", (void*)this, (int)ref);
 	SALOG("stop: called");
 	/* Prevent stale evEOF/evStopped from reaching enigma2 after we return.
 	   The pollTimer can still fire while enigma2 is cleaning up; without this
@@ -996,7 +997,6 @@ RESULT eServiceApp::pause()
 
 RESULT eServiceApp::unpause()
 {
-	eDebug("eServiceApp::unpause - DIAG this=%p ref=%d player=%p", (void*)this, (int)ref, (void*)player);
 	player->resume();
 	return 0;
 }

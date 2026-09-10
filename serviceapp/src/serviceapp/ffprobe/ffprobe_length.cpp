@@ -53,11 +53,15 @@ extern bool g_debugLoggingEnabled;
 
 namespace {
 
-// Dieselben, bereits GLIBC-kompatibel gepatchten FFmpeg-6.1.1-Libs, die
-// exteplayer3 ohnehin mitbringt (siehe exteplayer3-build/build-ffmpeg.sh).
-// Absoluter Pfad statt Rpath auf serviceapp.so: das Verzeichnis liegt bewusst
-// ausserhalb des Loader-Caches, ein dlopen() ohne Pfad wuerde nicht greifen.
-const char *kAvformatPath = "/usr/lib/exteplayer3_deps/libavformat.so.60";
+// Dieselben FFmpeg-Libs, die exteplayer3 ohnehin mitbringt (siehe
+// exteplayer3-build/build-ffmpeg.sh). Absoluter Pfad statt Rpath auf
+// serviceapp.so: das Verzeichnis liegt bewusst ausserhalb des Loader-Caches,
+// ein dlopen() ohne Pfad wuerde nicht greifen. Unversionierter Symlink statt
+// fest kodierter SONAME-Version: eine hartkodierte Versionsnummer waere
+// bruechig gegenueber kuenftigen FFmpeg-Versionswechseln - der unversionierte
+// Symlink liegt dank der "cp -d lib*.so*"-Packaging-Zeile in build.sh
+// garantiert immer mit vor.
+const char *kAvformatPath = "/usr/lib/exteplayer3_deps/libavformat.so";
 // 1,5s war zu knapp: sehr grosse Dateien (getestet: 12-21GB MP4s mit dem
 // "moov"-Atom am Dateiende statt am Anfang) brauchen fuer den Seek dorthin
 // nachweislich bis zu ~2,5s auf lokaler Platte. 5s laesst dafuer ausreichend

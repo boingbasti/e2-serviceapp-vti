@@ -6,6 +6,8 @@ __asm__(".symver pow,pow@GLIBC_2.0");
 __asm__(".symver vsscanf,vsscanf@GLIBC_2.0");
 __asm__(".symver strtol,strtol@GLIBC_2.0");
 __asm__(".symver __isoc23_strtol,strtol@GLIBC_2.0");
+__asm__(".symver strtoll,strtoll@GLIBC_2.0");
+__asm__(".symver __isoc23_strtoll,strtoll@GLIBC_2.0");
 __asm__(".symver __isoc23_sscanf,sscanf@GLIBC_2.0");
 /* dlopen/dlsym/dlclose/dlerror wurden mit glibc 2.34 von libdl.so.2 in
    libc.so.6 zusammengefuehrt - der Build-Host exportiert sie deshalb

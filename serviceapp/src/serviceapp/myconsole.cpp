@@ -201,6 +201,18 @@ void eConsoleContainer::sendCtrlC()
          * ('pid' might not even be running anymore at this point)
          */
         ::kill(-pid, SIGINT);
+        /*
+         * Also signal the main pid directly: verified live with a real
+         * recording that a multithreaded ffmpeg 7 process (DASH recording,
+         * network/demuxer worker threads) can swallow a process-group-wide
+         * SIGINT entirely and keep running to the source's natural end,
+         * while the exact same signal sent straight to its main pid
+         * triggers ffmpeg's own term_exit handler immediately (exit code
+         * 255, trailer written, file valid). Harmless no-op for single-
+         * process apps like exteplayer3, where pid IS already the sole
+         * process in its group.
+         */
+        ::kill(pid, SIGINT);
     }
 }
 

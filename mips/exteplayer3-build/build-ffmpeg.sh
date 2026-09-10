@@ -36,7 +36,19 @@ mipsel-linux-gnu-gcc -O2 -mips32 -mhard-float \
     -c "${BUILDDIR}/glibc_compat_ffmpeg.c" -o "${COMPAT_OBJ}"
 
 echo "=== Konfiguriere FFmpeg ==="
+# libxml2 (fuer den DASH-Demuxer): Header stammen aus dem eigenen Cross-Build
+# (2.12.9, ohne Module/Threads/HTTP-Client, architekturunabhaengig und 1:1
+# vom ARM-Sysroot uebernommen), das eigentliche Linker-Ziel ist aber bewusst
+# die reale, bereits im VTi-Feed installierte libxml2.so.2.9.2
+# (mips/sysroot/usr/lib/), damit zur Laufzeit auf der Box exakt dieselbe
+# Bibliothek verwendet wird, die schon da ist - libxml2 wird deshalb NICHT
+# mit ausgeliefert, sondern als opkg-Depends im ffmpeg-Paket eingetragen
+# (siehe package-ffmpeg-ipk.sh), analog zu ARM.
+export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig"
+export PKG_CONFIG_PATH=""
+
 ./configure \
+  --pkg-config=pkg-config \
   --prefix="${PREFIX}" \
   --enable-shared \
   --disable-static \
@@ -54,6 +66,7 @@ echo "=== Konfiguriere FFmpeg ==="
   --disable-mipsdspr2 \
   --disable-mips32r2 \
   --enable-zlib \
+  --enable-libxml2 \
   --disable-doc \
   --disable-debug \
   --disable-htmlpages \

@@ -25,6 +25,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Optionaler PCM-Audio-Export für Drittanbieter-Plugins (z. B. Live-Untertitel per Spracherkennung) über eine feste Named Pipe, ohne zweite Verbindung zum Stream (Details in [docs/pcm_audio_export_documentation.md](docs/pcm_audio_export_documentation.md))
 - Info-Key für Drittanbieter-Plugins, um zu erkennen, ob eine Wiedergabe gerade über ServiceApp (`exteplayer3`/`gstplayer`) oder über den nativen Player läuft
 - Aufnahme von ServiceApp-Kanälen (Referenztyp 5001/5002): unabhängiger Hintergrundprozess statt Zugriff auf den laufenden Wiedergabepfad, dadurch auch als Timer-Aufnahme im Standby nutzbar; speichert `.ts`+`.meta`, bei EPG-Verknüpfung zusätzlich `.eit`
+- MPEG-DASH-Unterstützung (`.mpd`) für Wiedergabe und Aufnahme, inklusive automatischer Bitraten-Auswahl mit Hardware-Decoder-Schutz (kein UHD-H.264 auf Boxen, die es nicht dekodieren können)
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).

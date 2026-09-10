@@ -26,6 +26,14 @@ struct ExtEplayer3Options
 		pcmAudioExportEnabled(false) {};
 };
 
+// Liefert das aktuelle "HLS/DASH start quality"-Setting fuer das
+// serviceexteplayer3-Profil (0=auto, 1=lowest, 2=highest, siehe
+// ExtEplayer3Options oben). g_ExtEplayer3OptionsServiceExt3 selbst ist
+// static in serviceapp.cpp - dieser Getter ist der einzige Zugriffspunkt
+// fuer andere Uebersetzungseinheiten (z.B. serviceapprecord.cpp fuer die
+// DASH-Aufnahme-Stream-Auswahl).
+int getServiceExt3HlsQualityMode();
+
 class ExtEplayer3: public PlayerApp, public BasePlayer
 {
 	ExtEplayer3Options mPlayerOptions;
