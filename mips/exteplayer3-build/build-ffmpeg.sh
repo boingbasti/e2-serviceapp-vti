@@ -25,6 +25,10 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     tar xf "${FFMPEG_TAR}"
     echo "=== Appliere HLS Preselect Patch ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-hls-native-preselect.patch"
+    echo "=== Appliere CENC/DRM-Support-Patch (archivCZSK-Kompatibilitaet) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-cenc-drm-support.patch"
+    echo "=== Appliere EAC3-Stream-Type-Fix (PMT-Stream-Type 0x87) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-eac3-stream-type-fix.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"

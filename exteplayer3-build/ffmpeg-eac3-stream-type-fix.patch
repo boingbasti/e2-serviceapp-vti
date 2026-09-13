@@ -1,0 +1,16 @@
+--- a/libavformat/mpegts.c
++++ b/libavformat/mpegts.c
+@@ -844,6 +844,13 @@
+ /* ATSC ? */
+ static const StreamType MISC_types[] = {
+     { 0x81, AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_AC3 },
++    /* 0x87: ATSC A/52-Kennung fuer Enhanced AC-3 in der PMT, fehlte in
++     * FFmpeg upstream. Ohne diesen Eintrag bleibt ein so deklarierter
++     * Audio-Stream fuer exteplayer3 unerkannt (codec_id=NONE), da das dort
++     * bewusst deaktivierte Bitstream-Probing (noprobe=1, siehe exteplayer.c)
++     * das sonst uebliche Nacherkennen verhindert - der Track verschwindet
++     * komplett aus a_l, obwohl GStreamer/Android ihn sofort erkennen. */
++    { 0x87, AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_EAC3 },
+     { 0x8a, AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_DTS },
+     { 0 },
+ };

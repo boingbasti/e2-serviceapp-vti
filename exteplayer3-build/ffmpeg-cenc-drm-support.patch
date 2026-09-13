@@ -1,0 +1,407 @@
+--- a/doc/demuxers.texi	2023-11-11 01:25:17.000000000 +0100
++++ b/doc/demuxers.texi	2026-09-11 13:04:57.536980278 +0200
+@@ -281,7 +281,11 @@
+ @table @option
+ 
+ @item cenc_decryption_key
+-16-byte key, in hex, to decrypt files encrypted using ISO Common Encryption (CENC/AES-128 CTR; ISO/IEC 23001-7).
++Default 16-byte key, in hex, to decrypt files encrypted using ISO Common Encryption (CENC/AES-128 CTR; ISO/IEC 23001-7).
++
++@item cenc_decryption_keys
++Dictionary of 16-byte key ID => 16-byte key, both in hex, to decrypt files encrypted using ISO Common Encryption
++(CENC/AES-128 CTR; ISO/IEC 23001-7).
+ 
+ @end table
+ 
+@@ -769,7 +773,11 @@
+ specify.
+ 
+ @item decryption_key
+-16-byte key, in hex, to decrypt files encrypted using ISO Common Encryption (CENC/AES-128 CTR; ISO/IEC 23001-7).
++Default 16-byte key, in hex, to decrypt files encrypted using ISO Common Encryption (CENC/AES-128 CTR; ISO/IEC 23001-7).
++
++@item decryption_keys
++Dictionary of 16-byte key ID => 16-byte key, both in hex, to decrypt files encrypted using ISO Common Encryption
++(CENC/AES-128 CTR; ISO/IEC 23001-7).
+ 
+ @item max_stts_delta
+ Very high sample deltas written in a trak's stts box may occasionally be intended but usually they are written in
+--- a/fftools/ffmpeg_demux.c	2023-11-11 01:25:17.000000000 +0100
++++ b/fftools/ffmpeg_demux.c	2026-09-11 13:04:57.552979977 +0200
+@@ -1481,6 +1481,13 @@
+         av_dict_set(&o->g->format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+         scan_all_pmts_set = 1;
+     }
++
++    if( strncmp(filename, "http://127.0.0.1", 16) == 0 )
++    {
++        /* when using with ArchivCZSK, then indicate DRM support */
++        av_dict_set(&o->g->format_opts, "headers", "X-DRM-Api-Level: 1\r\n", AV_DICT_APPEND);
++    }
++
+     /* open the input file with generic avformat function */
+     err = avformat_open_input(&ic, filename, file_iformat, &o->g->format_opts);
+     if (err < 0) {
+--- a/libavformat/dashdec.c	2023-11-11 01:25:17.000000000 +0100
++++ b/libavformat/dashdec.c	2026-09-11 13:05:52.435942326 +0200
+@@ -116,7 +116,11 @@
+     uint32_t init_sec_data_len;
+     uint32_t init_sec_buf_read_offset;
+     int64_t cur_timestamp;
++    int64_t first_pts;
+     int is_restart_needed;
++
++    char *cenc_decryption_key;
++    char *cenc_decryption_keys;
+ };
+ 
+ typedef struct DASHContext {
+@@ -153,6 +157,9 @@
+     AVDictionary *avio_opts;
+     int max_url_size;
+     char *cenc_decryption_key;
++    char *cenc_decryption_keys;
++    char *cenc_decryption_video_key;
++    char *cenc_decryption_audio_key;
+ 
+     /* Flags for init section*/
+     int is_init_section_common_video;
+@@ -364,6 +371,8 @@
+     av_freep(&pls->url_template);
+     av_freep(&pls->lang);
+     av_freep(&pls->id);
++    av_freep(&pls->cenc_decryption_key);
++    av_freep(&pls->cenc_decryption_keys);
+     av_freep(&pls);
+ }
+ 
+@@ -877,7 +886,9 @@
+             return AVERROR(ENOMEM);
+         }
+     }
++
+     rep->parent = s;
++    rep->first_pts = INT64_MIN;
+     representation_segmenttemplate_node = find_child_node_by_name(representation_node, "SegmentTemplate");
+     representation_baseurl_node = find_child_node_by_name(representation_node, "BaseURL");
+     representation_segmentlist_node = find_child_node_by_name(representation_node, "SegmentList");
+@@ -890,6 +901,37 @@
+             goto enomem;
+     }
+ 
++    val = xmlGetProp(representation_node, "cenc_decryption_key");
++    if (val) {
++        rep->cenc_decryption_key = av_strdup(val);
++        av_log(s, AV_LOG_INFO, "Setting key %s for %s\n", rep->cenc_decryption_key, rep->id);
++        xmlFree(val);
++        if (!rep->cenc_decryption_key)
++            goto enomem;
++    }
++    else
++    {
++        if (type == AVMEDIA_TYPE_VIDEO && c->cenc_decryption_video_key != NULL)
++        {
++            rep->cenc_decryption_key = av_strdup(c->cenc_decryption_video_key);
++            av_log(s, AV_LOG_INFO, "Setting video key %s for %s\n", rep->cenc_decryption_key, rep->id);
++        }
++        else if (type == AVMEDIA_TYPE_AUDIO && c->cenc_decryption_audio_key != NULL)
++        {
++            rep->cenc_decryption_key = av_strdup(c->cenc_decryption_audio_key);
++            av_log(s, AV_LOG_INFO, "Setting audio key %s for %s\n", rep->cenc_decryption_key, rep->id);
++        }
++    }
++
++    val = xmlGetProp(representation_node, "cenc_decryption_keys");
++    if (val) {
++        rep->cenc_decryption_keys = av_strdup(val);
++        av_log(s, AV_LOG_INFO, "Setting keys %s for %s\n", rep->cenc_decryption_keys, rep->id);
++        xmlFree(val);
++        if (!rep->cenc_decryption_keys)
++            goto enomem;
++    }
++
+     baseurl_nodes[0] = mpd_baseurl_node;
+     baseurl_nodes[1] = period_baseurl_node;
+     baseurl_nodes[2] = adaptionset_baseurl_node;
+@@ -1901,9 +1943,16 @@
+     pls->ctx->pb = &pls->pb.pub;
+     pls->ctx->io_open  = nested_io_open;
+ 
+-    if (c->cenc_decryption_key)
++    if (pls->cenc_decryption_key)
++        av_dict_set(&in_fmt_opts, "decryption_key", pls->cenc_decryption_key, 0);
++    else if (c->cenc_decryption_key)
+         av_dict_set(&in_fmt_opts, "decryption_key", c->cenc_decryption_key, 0);
+ 
++    if (pls->cenc_decryption_keys)
++        av_dict_set(&in_fmt_opts, "decryption_keys", pls->cenc_decryption_keys, 0);
++    else if (c->cenc_decryption_keys)
++        av_dict_set(&in_fmt_opts, "decryption_keys", c->cenc_decryption_keys, 0);
++
+     // provide additional information from mpd if available
+     ret = avformat_open_input(&pls->ctx, "", in_fmt, &in_fmt_opts); //pls->init_section->url
+     av_dict_free(&in_fmt_opts);
+@@ -2199,6 +2248,19 @@
+     while (!ff_check_interrupt(c->interrupt_callback) && !ret) {
+         ret = av_read_frame(cur->ctx, pkt);
+         if (ret >= 0) {
++            if(cur->n_fragments != 1)
++            {
++                /* in multifragments mode - ensure, that PTS always starts from 0 */
++                if(cur->first_pts == INT64_MIN)
++                {
++                    av_log(c, AV_LOG_TRACE, "Setting first PTS to pos[%" PRId64 "] for %s\n", cur->first_pts, cur->id);
++                    cur->first_pts = pkt->pts;
++                }
++
++                pkt->pts -= cur->first_pts;
++                pkt->dts -= cur->first_pts;
++            }
++
+             /* If we got a packet, return it */
+             cur->cur_timestamp = av_rescale(pkt->pts, (int64_t)cur->ctx->streams[0]->time_base.num * 90000, cur->ctx->streams[0]->time_base.den);
+             pkt->stream_index = cur->stream_index;
+@@ -2251,6 +2313,8 @@
+     // find the nearest fragment
+     if (pls->n_timelines > 0 && pls->fragment_timescale > 0) {
+         int64_t num = pls->first_seq_no;
++        seek_pos_msec += (pls->first_pts / pls->fragment_timescale) * 1000;
++
+         av_log(pls->parent, AV_LOG_VERBOSE, "dash_seek with SegmentTimeline start n_timelines[%d] "
+                "last_seq_no[%"PRId64"].\n",
+                (int)pls->n_timelines, (int64_t)pls->last_seq_no);
+@@ -2344,7 +2408,10 @@
+         OFFSET(allowed_extensions), AV_OPT_TYPE_STRING,
+         {.str = "aac,m4a,m4s,m4v,mov,mp4,webm,ts"},
+         INT_MIN, INT_MAX, FLAGS},
+-    { "cenc_decryption_key", "Media decryption key (hex)", OFFSET(cenc_decryption_key), AV_OPT_TYPE_STRING, {.str = NULL}, INT_MIN, INT_MAX, .flags = FLAGS },
++    { "cenc_decryption_key", "Media default decryption key (hex)", OFFSET(cenc_decryption_key), AV_OPT_TYPE_STRING, {.str = NULL}, INT_MIN, INT_MAX, .flags = FLAGS },
++    { "cenc_decryption_keys", "Media decryption keys by KID (hex)", OFFSET(cenc_decryption_keys), AV_OPT_TYPE_STRING, {.str = NULL}, INT_MIN, INT_MAX, .flags = FLAGS },
++    { "cenc_decryption_video_key", "Media decryption video key scheme_cenc (hex)", OFFSET(cenc_decryption_video_key), AV_OPT_TYPE_STRING, {.str = NULL}, INT_MIN, INT_MAX, .flags = FLAGS },
++    { "cenc_decryption_audio_key", "Media decryption audio key scheme_cenc (hex)", OFFSET(cenc_decryption_audio_key), AV_OPT_TYPE_STRING, {.str = NULL}, INT_MIN, INT_MAX, .flags = FLAGS },
+     {NULL}
+ };
+ 
+--- a/libavformat/isom.h	2023-11-11 01:25:17.000000000 +0100
++++ b/libavformat/isom.h	2026-09-11 13:04:57.536980278 +0200
+@@ -312,8 +312,8 @@
+     void *audible_iv;
+     int audible_iv_size;
+     struct AVAES *aes_decrypt;
+-    uint8_t *decryption_key;
+-    int decryption_key_len;
++    uint8_t *decryption_default_key;
++    int decryption_default_key_len;
+     int enable_drefs;
+     int32_t movie_display_matrix[3][3]; ///< display matrix from mvhd
+     int have_read_mfra_size;
+@@ -328,6 +328,7 @@
+     } *avif_info;
+     int avif_info_size;
+     int interleaved_read;
++    AVDictionary* decryption_keys;
+ } MOVContext;
+ 
+ int ff_mp4_read_descr_len(AVIOContext *pb);
+--- a/libavformat/mov.c	2023-12-31 01:07:26.000000000 +0100
++++ b/libavformat/mov.c	2026-09-11 13:04:57.544980127 +0200
+@@ -7128,19 +7128,69 @@
+     return 0;
+ }
+ 
++static int get_key_from_kid(uint8_t* out, int len, MOVContext *c, AVEncryptionInfo *sample) {
++    AVDictionaryEntry *key_entry_hex;
++    char kid_hex[16*2+1];
++
++    if (c->decryption_default_key && c->decryption_default_key_len != len) {
++        av_log(c->fc, AV_LOG_ERROR, "invalid default decryption key length: got %d, expected %d\n", c->decryption_default_key_len, len);
++        return -1;
++    }
++
++    if (!c->decryption_keys) {
++        av_assert0(c->decryption_default_key);
++        memcpy(out, c->decryption_default_key, len);
++        av_log(c->fc, AV_LOG_DEBUG, "Returning default decryption key\n");
++        return 0;
++    }
++
++    if (sample->key_id_size != 16) {
++        av_log(c->fc, AV_LOG_ERROR, "invalid key ID size: got %u, expected 16\n", sample->key_id_size);
++        return -1;
++    }
++
++    ff_data_to_hex(kid_hex, sample->key_id, 16, 1);
++    key_entry_hex = av_dict_get(c->decryption_keys, kid_hex, NULL, AV_DICT_DONT_STRDUP_KEY|AV_DICT_DONT_STRDUP_VAL);
++
++    if (!key_entry_hex) {
++        if (!c->decryption_default_key) {
++            av_log(c->fc, AV_LOG_ERROR, "unable to find KID %s\n", kid_hex);
++            return -1;
++        }
++        memcpy(out, c->decryption_default_key, len);
++        av_log(c->fc, AV_LOG_DEBUG, "Returning default decryption key\n");
++        return 0;
++    }
++
++    size_t key_entry_len;
++    if (key_entry_len = strlen(key_entry_hex->value) != len*2) {
++        av_log(c->fc, AV_LOG_ERROR, "wrong key length: %lu\n", (long unsigned) key_entry_len);
++        return -1;
++    }
++    ff_hex_to_data(out, key_entry_hex->value);
++    av_log(c->fc, AV_LOG_DEBUG, "Returning decryption key %s for kid %s\n", key_entry_hex->value, kid_hex);
++    return 0;
++}
++
+ static int cenc_scheme_decrypt(MOVContext *c, MOVStreamContext *sc, AVEncryptionInfo *sample, uint8_t *input, int size)
+ {
+     int i, ret;
+     int bytes_of_protected_data;
++    uint8_t decryption_key[AES_CTR_KEY_SIZE];
+ 
+     if (!sc->cenc.aes_ctr) {
++        ret = get_key_from_kid(decryption_key, sizeof(decryption_key), c, sample);
++        if (ret < 0) {
++            return ret;
++        }
++
+         /* initialize the cipher */
+         sc->cenc.aes_ctr = av_aes_ctr_alloc();
+         if (!sc->cenc.aes_ctr) {
+             return AVERROR(ENOMEM);
+         }
+ 
+-        ret = av_aes_ctr_init(sc->cenc.aes_ctr, c->decryption_key);
++        ret = av_aes_ctr_init(sc->cenc.aes_ctr, decryption_key);
+         if (ret < 0) {
+             return ret;
+         }
+@@ -7186,15 +7236,21 @@
+     int i, ret;
+     int num_of_encrypted_blocks;
+     uint8_t iv[16];
++    uint8_t decryption_key[16];
+ 
+     if (!sc->cenc.aes_ctx) {
++        ret = get_key_from_kid(decryption_key, sizeof(decryption_key), c, sample);
++        if (ret < 0) {
++            return ret;
++        }
++
+         /* initialize the cipher */
+         sc->cenc.aes_ctx = av_aes_alloc();
+         if (!sc->cenc.aes_ctx) {
+             return AVERROR(ENOMEM);
+         }
+ 
+-        ret = av_aes_init(sc->cenc.aes_ctx, c->decryption_key, 16 * 8, 1);
++        ret = av_aes_init(sc->cenc.aes_ctx, decryption_key, 16 * 8, 1);
+         if (ret < 0) {
+             return ret;
+         }
+@@ -7245,15 +7301,21 @@
+ {
+     int i, ret, rem_bytes;
+     uint8_t *data;
++    uint8_t decryption_key[AES_CTR_KEY_SIZE];
+ 
+     if (!sc->cenc.aes_ctr) {
++        ret = get_key_from_kid(decryption_key, sizeof(decryption_key), c, sample);
++        if (ret < 0) {
++            return ret;
++        }
++
+         /* initialize the cipher */
+         sc->cenc.aes_ctr = av_aes_ctr_alloc();
+         if (!sc->cenc.aes_ctr) {
+             return AVERROR(ENOMEM);
+         }
+ 
+-        ret = av_aes_ctr_init(sc->cenc.aes_ctr, c->decryption_key);
++        ret = av_aes_ctr_init(sc->cenc.aes_ctr, decryption_key);
+         if (ret < 0) {
+             return ret;
+         }
+@@ -7311,15 +7373,21 @@
+     int i, ret, rem_bytes;
+     uint8_t iv[16];
+     uint8_t *data;
++    uint8_t decryption_key[16];
+ 
+     if (!sc->cenc.aes_ctx) {
++        ret = get_key_from_kid(decryption_key, sizeof(decryption_key), c, sample);
++        if (ret < 0) {
++            return ret;
++        }
++
+         /* initialize the cipher */
+         sc->cenc.aes_ctx = av_aes_alloc();
+         if (!sc->cenc.aes_ctx) {
+             return AVERROR(ENOMEM);
+         }
+ 
+-        ret = av_aes_init(sc->cenc.aes_ctx, c->decryption_key, 16 * 8, 1);
++        ret = av_aes_init(sc->cenc.aes_ctx, decryption_key, 16 * 8, 1);
+         if (ret < 0) {
+             return ret;
+         }
+@@ -7462,7 +7530,7 @@
+             return AVERROR_INVALIDDATA;
+         }
+ 
+-        if (mov->decryption_key) {
++        if (mov->decryption_keys || mov->decryption_default_key) {
+             return cenc_decrypt(mov, sc, encrypted_sample, pkt->data, pkt->size);
+         } else {
+             size_t size;
+@@ -8611,12 +8679,6 @@
+     MOVAtom atom = { AV_RL32("root") };
+     int i;
+ 
+-    if (mov->decryption_key_len != 0 && mov->decryption_key_len != AES_CTR_KEY_SIZE) {
+-        av_log(s, AV_LOG_ERROR, "Invalid decryption key len %d expected %d\n",
+-            mov->decryption_key_len, AES_CTR_KEY_SIZE);
+-        return AVERROR(EINVAL);
+-    }
+-
+     mov->fc = s;
+     mov->trak_index = -1;
+     /* .mov and .mp4 aren't streamable anyway (only progressive download if moov is before mdat) */
+@@ -9315,7 +9377,8 @@
+         "Fixed key used for handling Audible AAX files", OFFSET(audible_fixed_key),
+         AV_OPT_TYPE_BINARY, {.str="77214d4b196a87cd520045fd20a51d67"},
+         .flags = AV_OPT_FLAG_DECODING_PARAM },
+-    { "decryption_key", "The media decryption key (hex)", OFFSET(decryption_key), AV_OPT_TYPE_BINARY, .flags = AV_OPT_FLAG_DECODING_PARAM },
++    { "decryption_key", "The default media decryption key (hex)", OFFSET(decryption_default_key), AV_OPT_TYPE_BINARY, .flags = AV_OPT_FLAG_DECODING_PARAM },
++    { "decryption_keys", "The media decryption keys by KID (hex)", OFFSET(decryption_keys), AV_OPT_TYPE_DICT, .flags = AV_OPT_FLAG_DECODING_PARAM },
+     { "enable_drefs", "Enable external track support.", OFFSET(enable_drefs), AV_OPT_TYPE_BOOL,
+         {.i64 = 0}, 0, 1, FLAGS },
+     { "max_stts_delta", "treat offsets above this value as invalid", OFFSET(max_stts_delta), AV_OPT_TYPE_INT, {.i64 = UINT_MAX-48000*10 }, 0, UINT_MAX, .flags = AV_OPT_FLAG_DECODING_PARAM },
+--- a/tests/fate/mov.mak	2023-11-11 01:25:17.000000000 +0100
++++ b/tests/fate/mov.mak	2026-09-11 13:04:57.536980278 +0200
+@@ -8,6 +8,9 @@
+            fate-mov-3elist-encrypted \
+            fate-mov-frag-encrypted \
+            fate-mov-tenc-only-encrypted \
++           fate-mov-3elist-encrypted-kid \
++           fate-mov-frag-encrypted-kid \
++           fate-mov-tenc-only-encrypted-kid \
+            fate-mov-invalid-elst-entry-count \
+            fate-mov-gpmf-remux \
+            fate-mov-440hz-10ms \
+@@ -57,6 +60,15 @@
+ # Full-sample encryption and constant IV using only tenc atom (no senc/saio/saiz).
+ fate-mov-tenc-only-encrypted: CMD = framemd5 -decryption_key 12345678901234567890123456789012 -i $(TARGET_SAMPLES)/mov/mov-tenc-only-encrypted.mp4
+ 
++# Edit list with encryption, using the decryption_keys option.
++fate-mov-3elist-encrypted-kid: CMD = framemd5 -decryption_keys 12345678901234567890123456789012=12345678901234567890123456789012 -i $(TARGET_SAMPLES)/mov/mov-3elist-encrypted.mov
++
++# Fragmented encryption with senc boxes in movie fragments, using the decryption_keys option.
++fate-mov-frag-encrypted-kid: CMD = framemd5 -decryption_keys abba271e8bcf552bbd2e86a434a9a5d9=12345678901234567890123456789012 -i $(TARGET_SAMPLES)/mov/mov-frag-encrypted.mp4
++
++# Full-sample encryption and constant IV using only tenc atom (no senc/saio/saiz), using the decryption_keys option.
++fate-mov-tenc-only-encrypted-kid: CMD = framemd5 -decryption_keys abba271e8bcf552bbd2e86a434a9a5d9=12345678901234567890123456789012 -i $(TARGET_SAMPLES)/mov/mov-tenc-only-encrypted.mp4
++
+ # Makes sure that the CTTS is also modified when we fix avindex in mov.c while parsing edit lists.
+ fate-mov-elist-starts-ctts-2ndsample: CMD = framemd5 -i $(TARGET_SAMPLES)/mov/mov-elist-starts-ctts-2ndsample.mov
+ 
