@@ -29,6 +29,8 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-cenc-drm-support.patch"
     echo "=== Appliere EAC3-Stream-Type-Fix (PMT-Stream-Type 0x87) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-eac3-stream-type-fix.patch"
+    echo "=== Appliere DASH-AV-Sync-Fix (Live-Streams, getrennte Video/Audio-Nullpunkte) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-avsync-fix.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"

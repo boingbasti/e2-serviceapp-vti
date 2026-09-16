@@ -1,0 +1,110 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -166,6 +166,11 @@
+     int is_init_section_common_audio;
+     int is_init_section_common_subtitle;
+
++    /* Stream-uebergreifender PTS-Zero-Anker (AV_TIME_BASE_Q), siehe
++     * dash_read_packet() - noetig, damit Video und Audio bei Live-DASH
++     * denselben Nullpunkt bekommen statt jeweils ihren eigenen. */
++    int64_t global_first_pts_us;
++
+ } DASHContext;
+
+ static int ishttp(char *url)
+@@ -265,6 +270,15 @@
+     int64_t j = 0;
+     int64_t num = 0;
+
++    /* Upstream-Fix (FFmpeg 8a8bde6a54e2, 2026-03-01, Issue 22335): cur_seq_no
++     * ist hier die ECHTE Segmentnummer (inkl. first_seq_no-Offset), die
++     * Timeline-Iteration unten zaehlt aber ab 0. Ohne diese Korrektur bleibt
++     * num==cur_seq_no fuer jede realistische Segmentnummer >0 unerreichbar,
++     * die Funktion faellt auf den letzten Timeline-Eintrag durch und liefert
++     * eine falsche start_time - das fuehrt bei refresh_manifest() zu falsch
++     * berechneten Segmentnummern und damit zu Rueckwaertssprueng bei Live-
++     * Streams. */
++    cur_seq_no -= pls->first_seq_no;
+     if (pls->n_timelines) {
+         for (i = 0; i < pls->n_timelines; i++) {
+             if (pls->timelines[i]->starttime > 0) {
+@@ -320,7 +334,13 @@
+     return -1;
+
+ finish:
+-    return num;
++    /* Upstream-Fix (FFmpeg 8a8bde6a54e2/3aa5d957d18d): num ist ein 0-
++     * basierter Timeline-Index, muss aber als ECHTE Segmentnummer an die
++     * Aufrufer zurueckgegeben werden - calc_cur_seg_no() korrigierte das
++     * bisher selbst nachtraeglich, refresh_manifest() rief diese Funktion
++     * aber direkt auf und schrieb den unkorrigierten 0-basierten Wert direkt
++     * in cur_seq_no. */
++    return num + pls->first_seq_no;
+ }
+
+ static void free_fragment(struct fragment **seg)
+@@ -1428,10 +1448,11 @@
+             av_log(s, AV_LOG_TRACE, "in n_timelines mode\n");
+             start_time_offset = get_segment_start_time_based_on_timeline(pls, 0xFFFFFFFF) - 60 * pls->fragment_timescale; // 60 seconds before end
+             num = calc_next_seg_no_from_timelines(pls, start_time_offset);
++            /* calc_next_seg_no_from_timelines() liefert jetzt bereits die
++             * echte Segmentnummer inkl. first_seq_no (siehe dort) - nur noch
++             * der -1-Sentinel (nicht gefunden) muss hier abgefangen werden. */
+             if (num == -1)
+                 num = pls->first_seq_no;
+-            else
+-                num += pls->first_seq_no;
+         } else if (pls->fragment_duration){
+             av_log(s, AV_LOG_TRACE, "in fragment_duration mode fragment_timescale = %"PRId64", presentation_timeoffset = %"PRId64"\n", pls->fragment_timescale, pls->presentation_timeoffset);
+             if (pls->presentation_timeoffset) {
+@@ -2070,6 +2091,7 @@
+     int i;
+
+     c->interrupt_callback = &s->interrupt_callback;
++    c->global_first_pts_us = INT64_MIN;
+
+     if ((ret = ffio_copy_url_options(s->pb, &c->avio_opts)) < 0)
+         return ret;
+@@ -2248,13 +2270,40 @@
+     while (!ff_check_interrupt(c->interrupt_callback) && !ret) {
+         ret = av_read_frame(cur->ctx, pkt);
+         if (ret >= 0) {
+-            if(cur->n_fragments != 1)
++            if(!c->is_live && cur->n_fragments != 1)
+             {
+-                /* in multifragments mode - ensure, that PTS always starts from 0 */
++                /* in multifragments mode - ensure, that PTS always starts from 0.
++                 * Nur fuer VOD: bei Live-DASH rotiert der Encoder seine Session
++                 * periodisch (neue SegmentTimeline-Basiszeit), wodurch ein einmal
++                 * gesetzter fixer Nullpunkt irgendwann nicht mehr zur aktuellen
++                 * absoluten PTS-Numerierung passt und negative/riesige Werte
++                 * erzeugt. exteplayer3s eigener sessionBasePts/resolveAndCache-
++                 * PtsOffset-Mechanismus (container_ffmpeg.c) uebernimmt die
++                 * Nullpunkt-Normalisierung fuer Live-Streams bereits selbst und
++                 * robuster (inkl. Cross-Anchor zwischen Audio/Video) - die
++                 * zusaetzliche Nullung hier wuerde dem nur in die Quere kommen.
++                 * Der Nullpunkt muss stream-uebergreifend (nicht pro
++                 * Representation) gesetzt werden: Video und Audio haben bei
++                 * DASH getrennte Sub-Kontexte, die nacheinander per HTTP
++                 * geoeffnet werden. Wuerde jede Representation ihren eigenen
++                 * ersten empfangenen Paket-PTS als Nullpunkt nehmen, ginge
++                 * der im Manifest kodierte echte A/V-Versatz verloren und
++                 * wuerde stattdessen durch die zufaellige Fetch-Timing-
++                 * Differenz zwischen Video- und Audio-Verbindung ersetzt -
++                 * bei VOD kaum sichtbar (beide oeffnen praktisch zeitgleich),
++                 * bei Live-Streams mit fortlaufend aktualisierter
++                 * SegmentTimeline aber ein dauerhafter, klar hoerbarer/
++                 * sichtbarer Bild/Ton-Versatz. */
++                AVRational tb = cur->ctx->streams[0]->time_base;
++                if (c->global_first_pts_us == INT64_MIN)
++                {
++                    c->global_first_pts_us = av_rescale_q(pkt->pts, tb, AV_TIME_BASE_Q);
++                }
+                 if(cur->first_pts == INT64_MIN)
+                 {
++                    cur->first_pts = av_rescale_q(c->global_first_pts_us, AV_TIME_BASE_Q, tb);
+                     av_log(c, AV_LOG_TRACE, "Setting first PTS to pos[%" PRId64 "] for %s\n", cur->first_pts, cur->id);
+-                    cur->first_pts = pkt->pts;
+                 }
+
+                 pkt->pts -= cur->first_pts;
