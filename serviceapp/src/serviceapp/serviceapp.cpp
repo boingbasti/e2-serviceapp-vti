@@ -795,12 +795,47 @@ void eServiceApp::gotExtPlayerMessage(int message)
 			if (m_has_selected_subtitle_track && isEmbeddedTrack(m_selected_subtitle_track))
 				pullSubtitles();
 			break;
+		case PlayerMessage::radioTextAvailable:
+		{
+			std::string rt, title, artist;
+			player->getRadioText(rt, title, artist);
+			eDebug("eServiceApp::gotExtPlayerMessage - radioTextAvailable rt=\"%s\" title=\"%s\" artist=\"%s\"", rt.c_str(), title.c_str(), artist.c_str());
+			recvMetadata(rt, title, artist);
+			break;
+		}
 		default:
 			eDebug("eServiceApp::gotExtPlayerMessage - unhandled message");
 			break;
 	}
 }
 
+void eServiceApp::recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist)
+{
+	m_radiotext = radiotext;
+	m_rtptext = radiotext;
+	m_meta_title = title;
+	m_meta_artist = artist;
+
+	if (m_has_event_slot)
+	{
+		m_event_slot(this, evUpdatedRadioText);
+		m_event_slot(this, evUpdatedRtpText);
+		m_event_slot(this, evUpdatedInfo);
+	}
+}
+
+// __iRdsDecoder
+std::string eServiceApp::getText(int x)
+{
+	if (x == RtpText)
+		return m_rtptext;
+	return m_radiotext;
+}
+
+SWIG_PYOBJECT(ePyObject) eServiceApp::getRassInteractiveMask()
+{
+	Py_RETURN_NONE;
+}
 
 // __iPlayableService
 RESULT eServiceApp::connectEvent(const SigC::Slot2< void, iPlayableService*, int >& event, ePtr< eConnection >& connection)
@@ -936,6 +971,10 @@ RESULT eServiceApp::stop()
 	   The pollTimer can still fire while enigma2 is cleaning up; without this
 	   guard a second evStopped/evEOF fires and corrupts enigma2 state. */
 	m_has_event_slot = false;
+	m_radiotext.clear();
+	m_rtptext.clear();
+	m_meta_title.clear();
+	m_meta_artist.clear();
 	if (my_subtitle_sync_timer) my_subtitle_sync_timer->stop();
 	if (my_event_updated_info_timer) my_event_updated_info_timer->stop();
 	if (my_nownext_timer) my_nownext_timer->stop();
@@ -1679,6 +1718,10 @@ std::string eServiceApp::getInfoString(int w)
 			break;
 		}
 	}
+	if (w == sTagTitle)
+		return m_meta_title;
+	if (w == sTagArtist)
+		return m_meta_artist;
 	if (w < sUser && w > 26 )
 		return "";
 	switch(w)

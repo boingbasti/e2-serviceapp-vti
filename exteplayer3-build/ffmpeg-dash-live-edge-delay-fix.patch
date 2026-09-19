@@ -1,0 +1,107 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -1454,17 +1454,49 @@
+             if (num == -1)
+                 num = pls->first_seq_no;
+         } else if (pls->fragment_duration){
+-            av_log(s, AV_LOG_TRACE, "in fragment_duration mode fragment_timescale = %"PRId64", presentation_timeoffset = %"PRId64"\n", pls->fragment_timescale, pls->presentation_timeoffset);
++            /* DASH-IF-IOP-Fallback (Abschnitt 4.3.4.4): fehlt im Manifest sowohl
++             * <SegmentTimeline> als auch @suggestedPresentationDelay, bleibt
++             * c->suggested_presentation_delay bei 0 - ohne Korrektur wird dann
++             * die Segmentnummer fuer die aktuelle Wanduhrzeit angefragt, also
++             * exakt die Live-Kante, die der Encoder gerade erst aufnimmt. Das
++             * CDN liefert dafuer 404, die Wiedergabe bricht nach dem ersten
++             * Segment mit EOF ab (beobachtet bei einem ZDF-DASH-Stream ohne
++             * beide Angaben). Fix: ein Mindestabstand von 4 Segmenten bzw.
++             * min_buffer_time (je nachdem was groesser ist), mindestens aber
++             * 8 Sekunden, wird nur dann angewendet, wenn kein echtes Delay im
++             * Manifest steht - Streams mit gesetztem suggestedPresentationDelay
++             * bleiben unveraendert. Reicht nur zum Anfuellen der anfaenglichen
++             * Wiedergabe-Queue, das eigentliche Fernhalten von der Live-Kante
++             * uebernimmt der dauerhafte Sicherheitsabstand in
++             * get_current_fragment() (siehe dort) - ein reines Start-Delay
++             * wird sonst durch das schnellere-als-Echtzeit-Vorlesen ohnehin
++             * nach kurzer Zeit wieder aufgebraucht. */
++            int64_t delay = c->suggested_presentation_delay;
++            if (!delay) {
++                int64_t seg_dur = (pls->fragment_timescale > 0) ?
++                    (pls->fragment_duration / pls->fragment_timescale) : 2;
++                if (seg_dur <= 0)
++                    seg_dur = 2;
++                delay = FFMAX(c->min_buffer_time, 4 * seg_dur);
++                if (delay < 8)
++                    delay = 8;
++            }
++            av_log(s, AV_LOG_TRACE, "in fragment_duration mode fragment_timescale = %"PRId64", presentation_timeoffset = %"PRId64", delay = %"PRId64"\n", pls->fragment_timescale, pls->presentation_timeoffset, delay);
+             if (pls->presentation_timeoffset) {
+                 num = pls->first_seq_no + (((get_current_time_in_sec() - c->availability_start_time) * pls->fragment_timescale)-pls->presentation_timeoffset) / pls->fragment_duration - c->min_buffer_time;
+             } else if (c->publish_time > 0 && !c->availability_start_time) {
+                 if (c->min_buffer_time) {
+-                    num = pls->first_seq_no + (((c->publish_time + pls->fragment_duration) - c->suggested_presentation_delay) * pls->fragment_timescale) / pls->fragment_duration - c->min_buffer_time;
++                    num = pls->first_seq_no + (((c->publish_time + pls->fragment_duration) - delay) * pls->fragment_timescale) / pls->fragment_duration - c->min_buffer_time;
+                 } else {
+-                    num = pls->first_seq_no + (((c->publish_time - c->time_shift_buffer_depth + pls->fragment_duration) - c->suggested_presentation_delay) * pls->fragment_timescale) / pls->fragment_duration;
++                    num = pls->first_seq_no + (((c->publish_time - c->time_shift_buffer_depth + pls->fragment_duration) - delay) * pls->fragment_timescale) / pls->fragment_duration;
+                 }
+             } else {
+-                num = pls->first_seq_no + (((get_current_time_in_sec() - c->availability_start_time) - c->suggested_presentation_delay) * pls->fragment_timescale) / pls->fragment_duration;
++                int64_t elapsed = get_current_time_in_sec() - c->availability_start_time;
++                if (elapsed > delay)
++                    elapsed -= delay;
++                else
++                    elapsed = 0;
++                num = pls->first_seq_no + (elapsed * pls->fragment_timescale) / pls->fragment_duration;
+             }
+         }
+     } else {
+@@ -1683,8 +1715,27 @@
+         if (pls->cur_seq_no <= min_seq_no) {
+             av_log(pls->parent, AV_LOG_VERBOSE, "old fragment: cur[%"PRId64"] min[%"PRId64"] max[%"PRId64"]\n", (int64_t)pls->cur_seq_no, min_seq_no, max_seq_no);
+             pls->cur_seq_no = calc_cur_seg_no(pls->parent, pls);
+-        } else if (pls->cur_seq_no > max_seq_no) {
+-            av_log(pls->parent, AV_LOG_VERBOSE, "new fragment: min[%"PRId64"] max[%"PRId64"]\n", min_seq_no, max_seq_no);
++        } else {
++            /* Dauerhafter Sicherheitsabstand zur Live-Kante (nicht nur beim
++             * Start): der Demuxer liest hier mit ueber 1x Echtzeitgeschwindigkeit
++             * vor (beim ZDF-Stream ca. 1,3x, live per ffmpeg-Testlauf gemessen),
++             * wodurch jedes rein einmalige Start-Delay nach kurzer Zeit
++             * komplett aufgebraucht ist und cur_seq_no dauerhaft exakt auf
++             * max_seq_no reitet - jede kleine CDN-Verzoegerung fuehrt dann zu
++             * 404 und einer PTS-Luecke. Zwei Segmente Abstand zu max_seq_no
++             * halten den Demuxer dauerhaft in sicherem Terrain, unabhaengig
++             * davon wie schnell er vorlesen will. */
++            int64_t cdn_safe_max = max_seq_no > (pls->first_seq_no + 2) ? (max_seq_no - 2) : pls->first_seq_no;
++            if (pls->cur_seq_no > cdn_safe_max) {
++                av_log(pls->parent, AV_LOG_VERBOSE, "waiting for live fragment: cur[%"PRId64"] max[%"PRId64"] safe_max[%"PRId64"]\n", (int64_t)pls->cur_seq_no, max_seq_no, cdn_safe_max);
++                int wait_count = 0;
++                while (pls->cur_seq_no > cdn_safe_max && wait_count < 25 && !ff_check_interrupt(c->interrupt_callback)) {
++                    av_usleep(200 * 1000);
++                    wait_count++;
++                    max_seq_no = calc_max_seg_no(pls, c);
++                    cdn_safe_max = max_seq_no > (pls->first_seq_no + 2) ? (max_seq_no - 2) : pls->first_seq_no;
++                }
++            }
+         }
+         seg = av_mallocz(sizeof(struct fragment));
+         if (!seg) {
+@@ -1852,6 +1903,20 @@
+             goto end;
+ 
+         ret = open_input(c, v, v->cur_seg);
++        if (ret < 0 && c->is_live && !ff_check_interrupt(c->interrupt_callback)) {
++            /* Bei Live-Streams, die auf der Live-Kante reiten (siehe
++             * get_current_fragment()), kann ein Segment auch bei bereits
++             * eingehaltenem Sicherheitsabstand vereinzelt noch minimal zu
++             * frueh angefragt werden (kurzzeitige CDN-Verzoegerung). Statt
++             * das komplette Segment sofort unwiederbringlich zu verwerfen
++             * (PTS-Luecke, A/V-Desync), kurz erneut versuchen. */
++            int retry_count = 0;
++            while (ret < 0 && retry_count < 2 && !ff_check_interrupt(c->interrupt_callback)) {
++                av_usleep(400 * 1000);
++                retry_count++;
++                ret = open_input(c, v, v->cur_seg);
++            }
++        }
+         if (ret < 0) {
+             if (ff_check_interrupt(c->interrupt_callback)) {
+                 ret = AVERROR_EXIT;

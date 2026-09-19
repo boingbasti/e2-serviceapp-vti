@@ -26,6 +26,8 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Info-Key für Drittanbieter-Plugins, um zu erkennen, ob eine Wiedergabe gerade über ServiceApp (`exteplayer3`/`gstplayer`) oder über den nativen Player läuft
 - Aufnahme von ServiceApp-Kanälen (Referenztyp 5001/5002): unabhängiger Hintergrundprozess statt Zugriff auf den laufenden Wiedergabepfad, dadurch auch als Timer-Aufnahme im Standby nutzbar; speichert `.ts`+`.meta`, bei EPG-Verknüpfung zusätzlich `.eit`
 - MPEG-DASH-Unterstützung (`.mpd`) für Wiedergabe und Aufnahme, inklusive automatischer Bitraten-Auswahl mit Hardware-Decoder-Schutz (kein UHD-H.264 auf Boxen, die es nicht dekodieren können)
+- Titel und Interpret bei Webradio (ICY-StreamTitle, ID3-Tags) in Infobar und Frontdisplay über die `iRdsDecoder`-Schnittstelle von Enigma2
+- Tonspurwechsel bei Live-DASH-Streams mit mehreren Tonspuren ohne Bild-/Ton-Versatz, gleichnamige Spuren werden durchnummeriert
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).

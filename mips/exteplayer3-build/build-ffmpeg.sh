@@ -31,6 +31,8 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-eac3-stream-type-fix.patch"
     echo "=== Appliere DASH-AV-Sync-Fix (Live-Streams, getrennte Video/Audio-Nullpunkte) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-avsync-fix.patch"
+    echo "=== Appliere DASH-Live-Edge-Delay-Fix (Segmentnummer vor Manifest-Veroeffentlichung) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-live-edge-delay-fix.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"

@@ -243,6 +243,16 @@ void ExtEplayer3::handleJsonOutput(cJSON *json)
 		s.text = cJSON_GetObjectItem(value, "t")->valuestring;
 		recvSubtitleMessage(s);
 	}
+	else if (!strcmp(key, "m_t"))
+	{
+		cJSON *rt = cJSON_GetObjectItem(value, "rt");
+		cJSON *t = cJSON_GetObjectItem(value, "t");
+		cJSON *a = cJSON_GetObjectItem(value, "a");
+		std::string s_rt = (rt && rt->valuestring) ? rt->valuestring : "";
+		std::string s_t = (t && t->valuestring) ? t->valuestring : "";
+		std::string s_a = (a && a->valuestring) ? a->valuestring : "";
+		recvMetadata(s_rt, s_t, s_a);
+	}
 	else if (!strcmp(key, "PLAYBACK_LENGTH"))
 	{
 		if (!cJSON_GetObjectItem(value, "sts")->valueint)

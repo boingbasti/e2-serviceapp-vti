@@ -117,6 +117,7 @@ static int32_t restart_audio_resampling = 0;
 
 static int64_t g_seek_target_seconds = 0;
 static bool g_do_seek_target_seconds = false;
+static bool g_seek_flush_only = false; /* nur Puffer/Stamp neu, kein Seek, PTS-Zustand bleibt */
 static void *g_stamp;
 
 /* ***************************** */
@@ -962,6 +963,16 @@ typedef struct
  * Cross-Track-Anchoring oben; isAudio steuert das Vorzeichen von
  * knownGoodAVDelta. packetCounterAtLastGoodPts wird bei jedem gueltigen
  * Update der EIGENEN Spur auf totalPacketCounter gesetzt. */
+/* Live-DASH-Tonspurwechsel ohne Seek: Alle Audio-Repraesentationen liegen auf derselben
+ * DASH-Zeitachse wie das Video. Die neue Spur startet aber am Beginn ihres (rund 2s
+ * langen) Segments, also VOR der aktuellen Position. Ein Cross-Anchor auf das letzte
+ * Video-PTS wuerde dieses aeltere erste Paket auf "jetzt" legen und die ganze Spur um
+ * ein Segment nach hinten verschieben. Deshalb erbt die neue Spur den Offset der
+ * zuletzt aktiven Audiospur. */
+static volatile int g_audioSwitchInheritOffset = 0;
+static int64_t g_lastAudioOffsetUsed = 0;
+static int g_haveLastAudioOffset = 0;
+
 static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheSize,
                                          void *streamPtr, int64_t rawPts,
                                          int64_t *lastGoodPts, int *nextSlot, const char *trackTag,
@@ -985,6 +996,12 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
         {
             int64_t corrected = applyPtsOffset(rawPts, cache[i].offset);
             bool needRelearn = false;
+            if (isAudio)
+            {
+                g_lastAudioOffsetUsed = cache[i].offset;
+                g_haveLastAudioOffset = 1;
+                g_audioSwitchInheritOffset = 0;
+            }
 
             if (corrected == INVALID_PTS_VALUE)
             {
@@ -1067,7 +1084,12 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
     }
 
     int64_t offset;
-    if (*lastGoodPts >= 0)
+    if (isAudio && g_audioSwitchInheritOffset && g_haveLastAudioOffset && *lastGoodPts >= 0)
+    {
+        offset = g_lastAudioOffsetUsed;
+        g_audioSwitchInheritOffset = 0;
+    }
+    else if (*lastGoodPts >= 0)
     {
         int64_t target = otherTrackFresh ? crossTarget : *lastGoodPts;
         offset = rawPts - target;
@@ -1199,6 +1221,165 @@ static char* searchMeta(void * metadata, char* ourTag)
    return NULL;
 }
 
+/* Webradio-/Stream-Metadaten (Titel/Interpret) fuer iRdsDecoder in serviceapp,
+ * Zwei unabhaengige Quellen:
+ * 1. ICY-StreamTitle (Shoutcast/Icecast): FFmpeg selbst verbindet die von
+ *    http.c bei jedem icy_metaint-Intervall aktualisierte "icy_metadata_packet"-
+ *    AVOption NICHT automatisch mit avContext->metadata/event_flags - deshalb
+ *    hier direkt per av_opt_get() mit AV_OPT_SEARCH_CHILDREN vom zugrunde
+ *    liegenden AVIOContext/URLContext abgefragt (offizielle, dokumentierte
+ *    libavutil-API, kein FFmpeg-Patch noetig, live gegen einen echten Icecast-
+ *    Stream verifiziert).
+ * 2. Generische Metadaten (HLS/DASH ID3 TIT2/TPE1, MOV-Tags): FFmpeg setzt
+ *    dafuer bereits event_flags |= AVFMT_EVENT_FLAG_METADATA_UPDATED. */
+static char lastIcyMetadata[512] = "";
+static char lastMetaTitle[256] = "";
+static char lastMetaArtist[256] = "";
+
+static char *jsonEscapeMeta(const char *str)
+{
+    static char tmp[600];
+    char *ptr1 = tmp;
+    const char *ptr2 = str;
+    while (*ptr2 != '\0' && (ptr1 - tmp) < (int)sizeof(tmp) - 2)
+    {
+        switch (*ptr2)
+        {
+        case '"':
+        case '\\':
+            *ptr1++ = '\\';
+            *ptr1++ = *ptr2;
+            break;
+        case '\n':
+        case '\r':
+        case '\t':
+            /* Zeilenumbrueche/Tabs in Metadaten sind unueblich, aber
+             * sicherheitshalber wie im vorhandenen Subtitle-Escaper
+             * behandeln statt rohe Kontrollzeichen ins JSON zu schreiben. */
+            *ptr1++ = ' ';
+            break;
+        default:
+            *ptr1++ = *ptr2;
+            break;
+        }
+        ++ptr2;
+    }
+    *ptr1 = '\0';
+    return tmp;
+}
+
+static void sendMetadataUpdate(const char *radiotext, const char *title, const char *artist)
+{
+    /* jsonEscapeMeta() gibt einen Zeiger auf einen einzigen gemeinsamen
+     * statischen Puffer zurueck - werden alle drei Aufrufe direkt als
+     * Argumente in EINEM E2iSendMsg()-Aufruf verschachtelt, ist die
+     * Auswertungsreihenfolge in C unspezifiziert und alle drei %s landen
+     * am Ende beim selben (zuletzt geschriebenen) Puffer-Inhalt. Deshalb
+     * hier nacheinander in eigene lokale Puffer kopieren. */
+    char escRt[600], escTitle[600], escArtist[600];
+    strncpy(escRt, jsonEscapeMeta(radiotext ? radiotext : ""), sizeof(escRt) - 1);
+    escRt[sizeof(escRt) - 1] = '\0';
+    strncpy(escTitle, jsonEscapeMeta(title ? title : ""), sizeof(escTitle) - 1);
+    escTitle[sizeof(escTitle) - 1] = '\0';
+    strncpy(escArtist, jsonEscapeMeta(artist ? artist : ""), sizeof(escArtist) - 1);
+    escArtist[sizeof(escArtist) - 1] = '\0';
+
+    E2iSendMsg("{\"m_t\":{\"rt\":\"%s\",\"t\":\"%s\",\"a\":\"%s\"}}\n", escRt, escTitle, escArtist);
+}
+
+static void checkStreamMetadataUpdate(AVFormatContext *avContext)
+{
+    if (!avContext)
+        return;
+
+    /* Quelle 1: ICY StreamTitle (Shoutcast/Icecast) */
+    if (avContext->pb)
+    {
+        uint8_t *icyPacket = NULL;
+        if (av_opt_get(avContext->pb, "icy_metadata_packet", AV_OPT_SEARCH_CHILDREN, &icyPacket) >= 0 && icyPacket)
+        {
+            if (icyPacket[0] != '\0' && strcmp((char *)icyPacket, lastIcyMetadata) != 0)
+            {
+                strncpy(lastIcyMetadata, (char *)icyPacket, sizeof(lastIcyMetadata) - 1);
+                lastIcyMetadata[sizeof(lastIcyMetadata) - 1] = '\0';
+
+                /* Format: StreamTitle='Interpret - Titel';StreamUrl='...'; */
+                char *titleStart = strstr((char *)icyPacket, "StreamTitle='");
+                if (titleStart)
+                {
+                    titleStart += strlen("StreamTitle='");
+                    char *titleEnd = strstr(titleStart, "';");
+                    if (titleEnd)
+                    {
+                        char fullTitle[400];
+                        size_t len = titleEnd - titleStart;
+                        if (len >= sizeof(fullTitle))
+                            len = sizeof(fullTitle) - 1;
+                        memcpy(fullTitle, titleStart, len);
+                        fullTitle[len] = '\0';
+
+                        char *sep = strstr(fullTitle, " - ");
+                        if (sep)
+                        {
+                            /* fullTitle enthaelt den kompletten "Interpret -
+                             * Titel"-String, der auch unveraendert als
+                             * radiotext gesendet werden soll - deshalb erst
+                             * die Kopie fuer den Interpret-Teil abtrennen,
+                             * fullTitle selbst bleibt fuer radiotext intakt. */
+                            char artist[400];
+                            size_t artistLen = sep - fullTitle;
+                            if (artistLen >= sizeof(artist))
+                                artistLen = sizeof(artist) - 1;
+                            memcpy(artist, fullTitle, artistLen);
+                            artist[artistLen] = '\0';
+                            sendMetadataUpdate(fullTitle, sep + 3, artist);
+                        }
+                        else
+                        {
+                            sendMetadataUpdate(fullTitle, fullTitle, "");
+                        }
+                    }
+                }
+            }
+            av_free(icyPacket);
+            return; /* ICY hat Vorrang, Prio 2 nur wenn kein ICY vorhanden */
+        }
+    }
+
+    /* Quelle 2: generische Metadaten (HLS/DASH ID3, MOV-Tags) */
+    if (avContext->event_flags & AVFMT_EVENT_FLAG_METADATA_UPDATED)
+    {
+        AVDictionaryEntry *tagTitle = av_dict_get(avContext->metadata, "title", NULL, 0);
+        if (!tagTitle)
+            tagTitle = av_dict_get(avContext->metadata, "TIT2", NULL, 0);
+        AVDictionaryEntry *tagArtist = av_dict_get(avContext->metadata, "artist", NULL, 0);
+        if (!tagArtist)
+            tagArtist = av_dict_get(avContext->metadata, "TPE1", NULL, 0);
+
+        const char *newTitle = tagTitle ? tagTitle->value : "";
+        const char *newArtist = tagArtist ? tagArtist->value : "";
+
+        if (strcmp(newTitle, lastMetaTitle) != 0 || strcmp(newArtist, lastMetaArtist) != 0)
+        {
+            strncpy(lastMetaTitle, newTitle, sizeof(lastMetaTitle) - 1);
+            lastMetaTitle[sizeof(lastMetaTitle) - 1] = '\0';
+            strncpy(lastMetaArtist, newArtist, sizeof(lastMetaArtist) - 1);
+            lastMetaArtist[sizeof(lastMetaArtist) - 1] = '\0';
+
+            if (newTitle[0] != '\0' || newArtist[0] != '\0')
+            {
+                char radiotext[512];
+                if (newArtist[0] != '\0' && newTitle[0] != '\0')
+                    snprintf(radiotext, sizeof(radiotext), "%s - %s", newArtist, newTitle);
+                else
+                    snprintf(radiotext, sizeof(radiotext), "%s%s", newArtist, newTitle);
+                sendMetadataUpdate(radiotext, newTitle, newArtist);
+            }
+        }
+        avContext->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+    }
+}
+
 /* **************************** */
 /* Worker Thread                */
 /* **************************** */
@@ -1291,6 +1472,7 @@ static void FFMPEGThread(Context_t *context)
     // for seek
     int64_t seek_target_seconds = 0;
     bool do_seek_target_seconds = false;
+    bool flush_only = false;
 
     int64_t seek_target_bytes = 0;
     bool do_seek_target_bytes = false;
@@ -1367,6 +1549,8 @@ static void FFMPEGThread(Context_t *context)
             do_seek_target_seconds = g_do_seek_target_seconds;
             seek_target_seconds = g_seek_target_seconds;
             stamp = g_stamp;
+            flush_only = g_seek_flush_only;
+            g_seek_flush_only = false;
             g_do_seek_target_seconds = false;
         }
         releaseSeekMutex();
@@ -1378,7 +1562,7 @@ static void FFMPEGThread(Context_t *context)
             {
                 ffmpeg_printf(10, "seek_target_seconds[%"PRId64"]\n", seek_target_seconds);
                 uint32_t i = 0;
-                for(; i<IPTV_AV_CONTEXT_MAX_NUM; i+=1)
+                for(; !flush_only && i<IPTV_AV_CONTEXT_MAX_NUM; i+=1)
                 {
                     multiContextLastPts[i] = INVALID_PTS_VALUE;
                     if(NULL != avContextTab[i])
@@ -1418,10 +1602,14 @@ static void FFMPEGThread(Context_t *context)
                  * nicht seek-abhaengig). Betrifft nur diesen Seek-Codepfad, die
                  * Werbesprung-Erkennung bei Live-Streams laeuft ueber denselben
                  * Mechanismus ausserhalb eines Seek-Befehls und bleibt unberuehrt. */
-                lastGoodVideoPts = -1;
-                lastGoodAudioPts = -1;
-                memset(videoPtsOffsetCache, 0, sizeof(videoPtsOffsetCache));
-                memset(audioPtsOffsetCache, 0, sizeof(audioPtsOffsetCache));
+                if (!flush_only)
+                {
+                    lastGoodVideoPts = -1;
+                    lastGoodAudioPts = -1;
+                    memset(videoPtsOffsetCache, 0, sizeof(videoPtsOffsetCache));
+                    memset(audioPtsOffsetCache, 0, sizeof(audioPtsOffsetCache));
+                }
+                flush_only = false;
                 reset_finish_timeout();
                 /*
                 if (bufferSize > 0)
@@ -1533,6 +1721,12 @@ static void FFMPEGThread(Context_t *context)
              * paketzaehlerbasierte Cross-Track-Frische-Pruefung in
              * resolveAndCachePtsOffset() (siehe OTHER_TRACK_FRESHNESS_LIMIT). */
             totalPacketCounter++;
+            /* Nur alle 30 Pakete pruefen: fuer Songtitel-Aktualisierungen mehr
+             * als ausreichend haeufig, vermeidet aber unnoetige av_opt_get()-
+             * Aufrufe bei hochbitratigen Video-Streams ohne jede ICY-Metadaten
+             * (dort faende sich sonst bei jedem einzelnen Paket nichts). */
+            if ((totalPacketCounter % 30) == 0)
+                checkStreamMetadataUpdate(avContextTab[cAVIdx]);
 
             reset_finish_timeout();
             if(avContextTab[cAVIdx]->streams[packet.stream_index]->discard != AVDISCARD_ALL)
@@ -1637,7 +1831,34 @@ static void FFMPEGThread(Context_t *context)
                     }
                     videoTrack->TimeScale = (videoTrack->frame_rate < 23970) ? 1001 : 1000;
                 }
+                /* Bei Containern mit mehreren Tonspuren liefert der Demuxer nach einem
+                 * Tonspurwechsel noch gepufferte Pakete der zuvor aktiven Spur. Deren Id
+                 * ist beim Manager bereits als Tonspur registriert und darf nicht als
+                 * Ad-Splice-Streamwechsel gelten (sonst wird die gewaehlte Spur
+                 * zurueckgeschrieben und die alte wieder aktiviert). */
+                bool pidIsKnownAudioTrack = false;
                 if (audioTrack && audioTrack->AVIdx == cAVIdx && audioTrack->Id != pid &&
+                    get_codecpar(pktStream)->codec_type == AVMEDIA_TYPE_AUDIO &&
+                    context->manager->audio)
+                {
+                    Track_t *mgrTracks = NULL;
+                    int32_t mgrTrackCount = 0;
+                    context->manager->audio->Command(context, MANAGER_REF_LIST, &mgrTracks);
+                    context->manager->audio->Command(context, MANAGER_REF_LIST_SIZE, &mgrTrackCount);
+                    if (mgrTracks && mgrTrackCount)
+                    {
+                        int32_t k;
+                        for (k = 0; k < mgrTrackCount; ++k)
+                        {
+                            if (mgrTracks[k].AVIdx == cAVIdx && mgrTracks[k].Id == pid)
+                            {
+                                pidIsKnownAudioTrack = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!pidIsKnownAudioTrack && audioTrack && audioTrack->AVIdx == cAVIdx && audioTrack->Id != pid &&
                     get_codecpar(pktStream)->codec_type == AVMEDIA_TYPE_AUDIO)
                 {
                     int32_t oldId = audioTrack->Id;
@@ -2879,6 +3100,16 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
     if (g_hls_audio_default_only) {
         av_dict_set(&avio_opts, "hls_audio_default_only", "1", 0);
     }
+    /* An der Live-Kante wartet FFmpegs HLS-Demuxer (hls.c) auf ein neues
+     * Segment, bricht dabei aber nach nur "max_reload" Versuchen (Standard 3,
+     * je reload_interval = halbe Segmentdauer) mit einem falschen EOF ab -
+     * behandelt exteplayer3 das bisher wie ein reguläres Stream-Ende und beendet die
+     * Wiedergabe komplett. Bei Sendern mit sehr grossen, staendig wachsenden
+     * "EVENT"-Playlists (z.B. TVO) reicht diese kurze Toleranz nicht immer
+     * aus, wenn das CDN die aktualisierte Playlist mit ein paar Sekunden
+     * Verzoegerung ausliefert. Deutlich hoeherer Wert, damit kurze CDN-
+     * Verzoegerungen an der Live-Kante nicht sofort zum Abbruch fuehren. */
+    av_dict_set(&avio_opts, "max_reload", "100", 0);
 
     pavio_opts = &avio_opts;
     
@@ -3489,6 +3720,31 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     lang = av_dict_get(stream->metadata, "language", NULL, 0);
 
                     track.Name = lang ? lang->value : "und";
+
+                    /* Mehrere Tonspuren mit identischem Sprachcode (z.B. ARD-DASH-Replay:
+                     * drei mal "de" ohne Role/Label im Manifest) waeren in der Auswahl
+                     * nicht unterscheidbar. Nur nummerieren, keine Bedeutung raten. */
+                    char audioNameBuf[48];
+                    {
+                        unsigned int same = 0, ordinal = 0, m;
+                        for (m = 0; m < avContext->nb_streams; m++)
+                        {
+                            AVStream *o = avContext->streams[m];
+                            if (get_codecpar(o)->codec_type != AVMEDIA_TYPE_AUDIO)
+                                continue;
+                            AVDictionaryEntry *ol = av_dict_get(o->metadata, "language", NULL, 0);
+                            if (strcmp(ol ? ol->value : "und", track.Name) != 0)
+                                continue;
+                            same++;
+                            if (o == stream)
+                                ordinal = same;
+                        }
+                        if (same > 1 && ordinal > 0)
+                        {
+                            snprintf(audioNameBuf, sizeof(audioNameBuf), "%s [%u]", track.Name, ordinal);
+                            track.Name = audioNameBuf;
+                        }
+                    }
 
                     ffmpeg_printf(10, "Language %s\n", track.Name);
 
@@ -4272,6 +4528,37 @@ static int32_t container_ffmpeg_switch_audio(Context_t *context, int32_t *arg)
     }
     releaseMutex(__FILE__, __FUNCTION__,__LINE__);
     
+    /* Bei Live-DASH lehnt der Demuxer jeden Seek ab (ENOSYS), PLAYBACK_SEEK leert aber
+     * trotzdem die Hardware-Puffer und setzt die gelernten PTS zurueck - Bildruckler
+     * und A/V-Versatz. Der Demuxer oeffnet die neue Tonspur selbst nach (discard). */
+    int isDashLive = avContextTab[0] != NULL && avContextTab[0]->iformat != NULL &&
+                     !strcmp(avContextTab[0]->iformat->name, "dash") &&
+                     (avContextTab[0]->duration == AV_NOPTS_VALUE || avContextTab[0]->duration <= 0);
+    if (isDashLive)
+    {
+        g_audioSwitchInheritOffset = 1;
+        restart_audio_resampling = 1;
+        /* Puffer leeren (wie PlaybackSeek), damit die neue Spur nicht erst nach dem
+         * gesamten Videopuffer hoerbar wird - aber ohne Demuxer-Seek und ohne die
+         * gelernten PTS zu verwerfen. */
+        if (context->playback->isPlaying && !context->playback->isForwarding &&
+            !context->playback->BackWard && !context->playback->SlowMotion &&
+            !context->playback->isPaused)
+        {
+            context->playback->isSeeking = 1;
+            context->playback->stamp = (void *)(uintptr_t)((uint32_t)(uintptr_t)context->playback->stamp + 1);
+            context->output->Command(context, OUTPUT_CLEAR, NULL);
+            getSeekMutex();
+            g_seek_target_seconds = 0;
+            g_seek_flush_only = true;
+            g_do_seek_target_seconds = true;
+            g_stamp = context->playback->stamp;
+            releaseSeekMutex();
+            context->playback->isSeeking = 0;
+        }
+        return cERR_CONTAINER_FFMPEG_NO_ERROR;
+    }
+
     /* Hellmaster1024: nothing to do here!*/
     int64_t sec = 0;
     context->playback->Command(context, PLAYBACK_SEEK, (void*)&sec);

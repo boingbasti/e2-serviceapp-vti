@@ -35,7 +35,7 @@ struct eServiceAppOptions
 
 class eServiceApp: public iPlayableService, public iPauseableService, public iServiceInformation,
 	public iSeekableService, public iAudioTrackSelection, public iAudioChannelSelection,
-	public iSubtitleOutput, public iSubserviceList, public iCueSheet
+	public iSubtitleOutput, public iSubserviceList, public iCueSheet, public iRdsDecoder
 {
 	DECLARE_REF(eServiceApp);
 
@@ -55,6 +55,9 @@ class eServiceApp: public iPlayableService, public iPauseableService, public iSe
 
 	bool m_paused;
 	int m_framerate, m_width, m_height, m_progressive;
+
+	std::string m_radiotext, m_rtptext, m_meta_title, m_meta_artist;
+	void recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist);
 
 	typedef std::map<uint32_t, subtitleMessage> subtitle_pages_map;
 	typedef std::pair<uint32_t, subtitleMessage> subtitle_pages_map_pair;
@@ -154,7 +157,7 @@ public:
 	RESULT cueSheet(ePtr<iCueSheet> &ptr);
 	RESULT subtitle(ePtr<iSubtitleOutput> &ptr){ ptr=this; return 0;};
 	RESULT audioDelay(ePtr<iAudioDelay> &ptr){ ptr=0; return -1;};
-	RESULT rdsDecoder(ePtr<iRdsDecoder> &ptr){ ptr=0; return -1;};
+	RESULT rdsDecoder(ePtr<iRdsDecoder> &ptr){ ptr=this; return 0;};
 	RESULT stream(ePtr<iStreamableService> &ptr){ ptr=0; return -1;};
 	RESULT streamed(ePtr<iStreamedService> &ptr){ ptr=0; return -1;};
 	RESULT keys(ePtr<iServiceKeys> &ptr){ ptr=0; return -1;};
@@ -178,6 +181,13 @@ public:
 	PyObject *getCutList();
 	void setCutList(SWIG_PYOBJECT(ePyObject) list);
 	void setCutListEnable(int enable);
+
+	// iRdsDecoder: Webradio-/Stream-Metadaten (ICY StreamTitle, ID3-Tags)
+	// werden hierueber angezeigt, siehe recvMetadata().
+	std::string getText(int x = RadioText);
+	void showRassSlidePicture() {}
+	void showRassInteractivePic(int page, int subpage) {}
+	SWIG_PYOBJECT(ePyObject) getRassInteractiveMask();
 
 	// iAudioTrackSelection
 	int getNumberOfTracks();

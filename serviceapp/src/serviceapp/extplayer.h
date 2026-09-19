@@ -66,6 +66,7 @@ struct PlayerMessage
 		videoProgressiveChanged,
 		videoFramerateChanged,
 		subtitleAvailable,
+		radioTextAvailable,
 	};
 };
 
@@ -140,6 +141,7 @@ public:
 	virtual void recvSubtitleMessage(subtitleMessage&){};
 	virtual void recvVideoTrackCurrent(int status, videoStream&){};
 	virtual void recvErrorMessage(errorMessage&){};
+	virtual void recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist){};
 };
 
 
@@ -168,6 +170,7 @@ protected:
 	void recvSeekTo(int status, int seconds){pCallback->recvSeekTo(status, seconds);};
 	void recvSeekRelative(int status, int seconds){pCallback->recvSeekRelative(status, seconds);};
 	void recvErrorMessage(errorMessage& message){pCallback->recvErrorMessage(message);};
+	void recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist){pCallback->recvMetadata(radiotext, title, artist);};
 public:
 	virtual ~BasePlayer(){}
 
@@ -199,6 +202,8 @@ class PlayerBackend: public iPlayerCallback
 	std::vector<subtitleStream> mSubtitleStreams;
 	std::queue<subtitleMessage> mSubtitles;
 
+	std::string mRadioText, mMetaTitle, mMetaArtist;
+
 	eTimer *myTimer;
 	unsigned int mTimerDelay;
 
@@ -223,6 +228,7 @@ class PlayerBackend: public iPlayerCallback
 	void recvSeekRelative(int status, int seconds){eDebug("PlayerBackend::recvSeekRelative %ds", seconds);}
 	void recvErrorMessage(errorMessage& message){pErrorMessage = new errorMessage(message);};
 	void recvSubtitleMessage(subtitleMessage& sub);
+	void recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist);
 
 public:
 	PlayerBackend(BasePlayer* extplayer):
@@ -267,6 +273,7 @@ public:
 	int getPlayPosition(int& mseconds);
 	int getErrorMessage(errorMessage& error);
 	int getSubtitles(std::queue<subtitleMessage>&);
+	void getRadioText(std::string &radiotext, std::string &title, std::string &artist) { radiotext = mRadioText; title = mMetaTitle; artist = mMetaArtist; }
 	int audioGetNumberOfTracks(int timeout=0);
 	int audioSelectTrack(int trackId);
 	int audioGetTrackInfo(audioStream& trackInfo, int trackId);

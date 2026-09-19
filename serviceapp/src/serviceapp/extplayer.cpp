@@ -636,6 +636,16 @@ void PlayerBackend::recvSubtitleMessage(subtitleMessage& sub)
 	if (gotPlayerMessage) gotPlayerMessage(PlayerMessage::subtitleAvailable);
 }
 
+void PlayerBackend::recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist)
+{
+	if (radiotext == mRadioText && title == mMetaTitle && artist == mMetaArtist)
+		return;
+	mRadioText = radiotext;
+	mMetaTitle = title;
+	mMetaArtist = artist;
+	if (gotPlayerMessage) gotPlayerMessage(PlayerMessage::radioTextAvailable);
+}
+
 int PlayerBackend::getSubtitles(std::queue< subtitleMessage >& subtitles)
 {
 	if (mSubtitles.empty())

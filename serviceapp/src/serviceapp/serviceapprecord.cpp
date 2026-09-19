@@ -10,7 +10,7 @@
 
 // Gleicher sigc++-Kompatibilitaets-Shim wie in serviceapp.cpp: epgcache.h
 // nutzt intern den modernen sigc::-Namespace, dieses Projekt hat aber nur die
-// alte sigc++-1.2-API (SigC::) zur Verfuegung (siehe [[project_serviceapp_abi_fixes]]).
+// alte sigc++-1.2-API (SigC::) zur Verfuegung.
 // Jede .cpp-Datei, die epgcache.h einbindet, braucht diesen Shim vorher lokal,
 // er lebt nicht in einem gemeinsamen Header.
 #ifdef HAVE_EPG
