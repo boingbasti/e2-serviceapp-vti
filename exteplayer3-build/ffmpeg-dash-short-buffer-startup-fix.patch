@@ -1,0 +1,33 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -1446,7 +1446,30 @@
+             num = pls->first_seq_no;
+         } else if (pls->n_timelines) {
+             av_log(s, AV_LOG_TRACE, "in n_timelines mode\n");
+-            start_time_offset = get_segment_start_time_based_on_timeline(pls, 0xFFFFFFFF) - 60 * pls->fragment_timescale; // 60 seconds before end
++            /* Live-Startposition bei <SegmentTimeline>: der urspruengliche Code
++             * zog pauschal 60 Sekunden vom Ende der Timeline ab, unabhaengig von
++             * der tatsaechlichen Puffergroesse (timeShiftBufferDepth). Bei kurzen
++             * Puffern (z.B. ORF-DASH-Streams mit nur ca. 30s) liegt dieser Punkt
++             * dann VOR dem Timeline-Beginn, calc_next_seg_no_from_timelines()
++             * landet direkt auf dem aeltesten verfuegbaren Segment. Wenige
++             * Sekunden spaeter verfaellt genau dieses Segment durch den
++             * normalen Live-Puffer-Vorlauf, der dadurch erzwungene
++             * Vorwaertssprung um eine volle Segmentlaenge loest unnoetig einen
++             * PTS-Relearn aus (Cross-Anchor gegen eine zu diesem Zeitpunkt noch
++             * nicht eingeschwungene Gegenspur -> dauerhafter Bild/Ton-Versatz).
++             * Fix: ein im Manifest angegebenes suggestedPresentationDelay wird
++             * bevorzugt verwendet (DASH-IF-IOP-Empfehlung, exakter als eine
++             * Pauschale). Fehlt es, bleibt die bisherige 60s-Pauschale bestehen,
++             * wird aber auf die tatsaechliche Puffergroesse begrenzt, damit sie
++             * nie vor den Timeline-Beginn zurueckfaellt. */
++            int64_t back_seconds = c->suggested_presentation_delay ? (int64_t)c->suggested_presentation_delay : 60;
++            if (c->time_shift_buffer_depth > 0 && back_seconds > (int64_t)c->time_shift_buffer_depth) {
++                back_seconds = (int64_t)c->time_shift_buffer_depth > 4 ? (int64_t)c->time_shift_buffer_depth - 2 : (int64_t)c->time_shift_buffer_depth / 2;
++                if (back_seconds < 1)
++                    back_seconds = 1;
++            }
++            start_time_offset = get_segment_start_time_based_on_timeline(pls, 0xFFFFFFFF) - back_seconds * pls->fragment_timescale;
+             num = calc_next_seg_no_from_timelines(pls, start_time_offset);
+             /* calc_next_seg_no_from_timelines() liefert jetzt bereits die
+              * echte Segmentnummer inkl. first_seq_no (siehe dort) - nur noch

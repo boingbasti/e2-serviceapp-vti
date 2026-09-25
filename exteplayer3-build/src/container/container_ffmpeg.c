@@ -4116,7 +4116,17 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     ffmpeg_printf(1, "subtitle stream %p\n", stream);
 
                     ffmpeg_printf(10, "FOUND SUBTITLE %s\n", track.Name);
-                    
+
+                    /* Anders als Video/Audio bekommt hier bisher NIE eine Untertitelspur
+                     * discard=AVDISCARD_ALL, auch wenn sie nie ausgewaehlt wird. Bei DASH
+                     * haelt dash_read_packet() eine registrierte, aber leere/nie gelesene
+                     * Spur (cur_timestamp bleibt bei 0) dadurch dauerhaft fuer "kleinsten
+                     * Zeitstempel" und liest nur noch sie, bis sie an der Live-Kante
+                     * haengenbleibt - Video/Audio verhungern komplett. Erst beim expliziten
+                     * Auswaehlen (container_ffmpeg_switch_subtitle) wird die gewaehlte
+                     * Spur wieder auf DEFAULT gesetzt. */
+                    stream->discard = AVDISCARD_ALL;
+
                     if (context->manager->subtitle->Command(context, MANAGER_ADD, &track) < 0)
                     {
                         ffmpeg_err("failed to add subtitle track %d\n", n);
@@ -4568,8 +4578,32 @@ static int32_t container_ffmpeg_switch_audio(Context_t *context, int32_t *arg)
 static int32_t container_ffmpeg_switch_subtitle(Context_t *context, int32_t *arg)
 {
     ffmpeg_printf(10, "track %d\n", *arg);
-    
-    /* This is made to flush inside the buffer because 
+
+    /* Gewaehlte Spur auf DEFAULT, alle anderen auf ALL - siehe Kommentar bei der
+     * Registrierung oben (AVMEDIA_TYPE_SUBTITLE). Ohne das bleibt eine nie
+     * ausgewaehlte, leere Untertitelspur bei DASH dauerhaft aktiv und kann Video/
+     * Audio aushungern. */
+    if (context->manager->subtitle)
+    {
+        Track_t *Tracks = NULL;
+        int32_t TrackCount = 0;
+
+        context->manager->subtitle->Command(context, MANAGER_REF_LIST, &Tracks);
+        context->manager->subtitle->Command(context, MANAGER_REF_LIST_SIZE, &TrackCount);
+        if (Tracks && TrackCount)
+        {
+            int32_t i;
+            for (i = 0; i < TrackCount; ++i)
+            {
+                if (Tracks[i].stream)
+                {
+                    ((AVStream*)Tracks[i].stream)->discard = Tracks[i].Id == *arg ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+                }
+            }
+        }
+    }
+
+    /* This is made to flush inside the buffer because
      * subtitles frame was already read and ignored
      * we seek to force ffmpeg to read once again the same data
      * but now we will not ignore subtitle frame

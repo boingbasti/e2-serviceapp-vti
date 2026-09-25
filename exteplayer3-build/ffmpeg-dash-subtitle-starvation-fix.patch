@@ -1,0 +1,23 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -2258,6 +2258,20 @@
+         rep->assoc_stream = s->streams[rep->stream_index];
+         move_metadata(rep->assoc_stream, "id", &rep->id);
+         move_metadata(rep->assoc_stream, "language", &rep->lang);
++        /* Standardmaessig verworfen: manche DASH-Untertitelspuren (z.B. WebVTT-Streams
++         * ohne bzw. nur mit sehr seltenen Cues) probt FFmpeg nie erfolgreich, der
++         * assoc_stream bleibt dauerhaft bei codec_type=DATA/codec_id=NONE. Der
++         * Player-seitige Codec-Filter kann eine solche Spur deshalb nie als
++         * "nicht ausgewaehlte Untertitelspur" erkennen und discard=ALL setzen -
++         * sie bleibt auf dem Standard AVDISCARD_DEFAULT und dash_read_packet()
++         * waehlt sie jeden Aufruf erneut (ihr cur_timestamp bleibt mangels echter
++         * Pakete bei 0, also immer "kleinster Zeitstempel"), bis sie an der
++         * Live-Kante haengenbleibt - Video/Audio verhungern komplett. Der DASH-
++         * Demuxer weiss aber schon hier zweifelsfrei, dass dies eine Untertitelspur
++         * ist, unabhaengig vom spaeteren Probe-Ergebnis. Player-seitig (siehe
++         * container_ffmpeg_switch_subtitle) wird die tatsaechlich ausgewaehlte
++         * Spur wieder auf DEFAULT gesetzt. */
++        rep->assoc_stream->discard = AVDISCARD_ALL;
+     }
+
+     return 0;

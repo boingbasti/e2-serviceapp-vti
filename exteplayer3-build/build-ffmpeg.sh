@@ -33,6 +33,10 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-avsync-fix.patch"
     echo "=== Appliere DASH-Live-Edge-Delay-Fix (Segmentnummer vor Manifest-Veroeffentlichung) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-live-edge-delay-fix.patch"
+    echo "=== Appliere DASH-Untertitel-Verhungern-Fix (leere Untertitelspur haengt Video/Audio aus) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-subtitle-starvation-fix.patch"
+    echo "=== Appliere DASH-Kurzpuffer-Startpositions-Fix (SegmentTimeline, kurzer timeShiftBufferDepth) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-short-buffer-startup-fix.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"
