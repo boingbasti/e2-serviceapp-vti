@@ -1,6 +1,6 @@
 #!/bin/bash
 # Baut exteplayer3 für MIPS (mipsel, VU+ Solo2)
-# Ergebnis: release/exteplayer3_vti_1_181+git3_mips32el.ipk
+# Ergebnis: release/exteplayer3_vti_1_182+vti001_mips32el.ipk
 set -e
 
 BUILDDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -116,8 +116,8 @@ chmod 755 "${BUILDDIR}/repack/data_root/usr/lib/exteplayer3_deps"/lib*.so*
 # Erstelle control File
 cat > "${BUILDDIR}/repack/ctrl_root/control" << EOF
 Package: exteplayer3
-Version: 1:181+git3
-Description: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master with 3 additional post-181 commits. Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/.
+Version: 1:182+vti001
+Description: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master (Version 182). Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/.
 Section: libs
 Priority: optional
 Maintainer: saufsoldat
@@ -135,10 +135,10 @@ tar czf "${BUILDDIR}/repack/data.tar.gz" -C "${BUILDDIR}/repack/data_root" --own
 tar czf "${BUILDDIR}/repack/control.tar.gz" -C "${BUILDDIR}/repack/ctrl_root" --owner=0 --group=0 ./control
 
 mkdir -p "${BUILDDIR}/../../release"
-ar rcs "${BUILDDIR}/../../release/exteplayer3_vti_1_181+git3_mips32el.ipk" \
+ar rcs "${BUILDDIR}/../../release/exteplayer3_vti_1_182+vti001_mips32el.ipk" \
   "${BUILDDIR}/repack/debian-binary" \
   "${BUILDDIR}/repack/data.tar.gz" \
   "${BUILDDIR}/repack/control.tar.gz"
 
-echo "IPK: $(ls -lh "${BUILDDIR}/../../release/exteplayer3_vti_1_181+git3_mips32el.ipk")"
+echo "IPK: $(ls -lh "${BUILDDIR}/../../release/exteplayer3_vti_1_182+vti001_mips32el.ipk")"
 rm -rf "${BUILDDIR}/repack"

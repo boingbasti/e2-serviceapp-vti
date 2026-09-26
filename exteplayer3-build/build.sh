@@ -83,7 +83,7 @@ mkdir -p repack/data_root/usr/bin
 mkdir -p repack/ctrl_root
 # Setup control template if missing
 if [ ! -f repack/ctrl_root/control ]; then
-  echo -e "Package: exteplayer3\nVersion: 1:181+git3\nDescription: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master with 3 additional post-181 commits. Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/.\nSection: libs\nPriority: optional\nMaintainer: saufsoldat\nLicense: GPL-2.0\nHomepage: https://github.com/boingbasti/e2-serviceapp-vti\nArchitecture: armv7ahf-vfp-neon\nOE: exteplayer3\nDepends: libc6 (>= 2.20), libxml2\nSource: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https" > repack/ctrl_root/control
+  echo -e "Package: exteplayer3\nVersion: 1:182+vti001\nDescription: exteplayer3 - media player for E2, built from skyjet18/exteplayer3 master (Version 182). Includes FFmpeg 6.1.1 shared libraries in /usr/lib/exteplayer3_deps/.\nSection: libs\nPriority: optional\nMaintainer: saufsoldat\nLicense: GPL-2.0\nHomepage: https://github.com/boingbasti/e2-serviceapp-vti\nArchitecture: armv7ahf-vfp-neon\nOE: exteplayer3\nDepends: libc6 (>= 2.20), libxml2\nSource: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https" > repack/ctrl_root/control
 fi
 if [ ! -f repack/debian-binary ]; then
   echo "2.0" > repack/debian-binary
@@ -96,6 +96,6 @@ rm -f repack/data_root/usr/lib/exteplayer3_deps/libz.so*
 tar czf repack/data.tar.gz -C repack/data_root --owner=0 --group=0 ./usr
 tar czf repack/control.tar.gz -C repack/ctrl_root --owner=0 --group=0 ./control
 mkdir -p "$BUILDDIR/../release"
-ar rcs "$BUILDDIR/../release/exteplayer3_vti_1_181+git3_armv7ahf.ipk" repack/debian-binary repack/data.tar.gz repack/control.tar.gz
-echo "IPK: $(ls -lh "$BUILDDIR/../release/exteplayer3_vti_1_181+git3_armv7ahf.ipk")"
+ar rcs "$BUILDDIR/../release/exteplayer3_vti_1_182+vti001_armv7ahf.ipk" repack/debian-binary repack/data.tar.gz repack/control.tar.gz
+echo "IPK: $(ls -lh "$BUILDDIR/../release/exteplayer3_vti_1_182+vti001_armv7ahf.ipk")"
 
