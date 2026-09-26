@@ -1,6 +1,6 @@
 # e2-serviceapp-vti
 
-Cross-Build-Umgebung für das Enigma2-Plugin **ServiceApp** samt eigenem **exteplayer3**- und **FFmpeg**-Unterbau, angepasst für VTi-Images (VU+ Uno 4K SE, ARM armv7ahf; VU+ Solo2, MIPS mips32el). ServiceApp bindet Streams (z. B. Zattoo, HLS-Mediatheken) als eigenständige Wiedergabe-Engine in Enigma2 ein.
+Cross-Build-Umgebung für das Enigma2-Plugin **ServiceApp** samt eigenem **exteplayer3**- und **FFmpeg**-Unterbau, angepasst für VTi-Images (VTi 15: VU+ Uno 4K SE, ARM armv7ahf; VU+ Solo2, MIPS mips32el. VTi 16: VU+ Duo 4K Lite, ARM armv7ahf). ServiceApp bindet Streams (z. B. Zattoo, HLS-Mediatheken) als eigenständige Wiedergabe-Engine in Enigma2 ein.
 
 Dieses Repository enthält ausschließlich Quellcode, eigene Patches und Build-Skripte, **keine fertigen Binaries oder IPK-Pakete**.
 
@@ -8,7 +8,7 @@ Dieses Repository enthält ausschließlich Quellcode, eigene Patches und Build-S
 
 - **serviceapp** (`serviceapp/`): Fork von [mx3L/serviceapp](https://github.com/mx3L/serviceapp), enthält zusätzlich Codeanteile aus OpenPLi-Enigma2.
 - **exteplayer3** (`exteplayer3-build/src/`): Fork von [skyjet18/exteplayer3](https://github.com/skyjet18/exteplayer3).
-- **FFmpeg** (Build-Rezept unter `exteplayer3-build/`, `mips/exteplayer3-build/`): [ffmpeg.org](https://ffmpeg.org/), Version 6.1.1. Der FFmpeg-Quellcode selbst ist nicht Teil dieses Repositories.
+- **FFmpeg** (Build-Rezept unter `exteplayer3-build/`, `mips/exteplayer3-build/`, `vti16/exteplayer3-build/`): [ffmpeg.org](https://ffmpeg.org/), Version 6.1.1 (VTi 15) bzw. 7.0.2 (VTi 16). Der FFmpeg-Quellcode selbst ist nicht Teil dieses Repositories.
 
 Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
@@ -62,6 +62,20 @@ Analoger Ablauf mit der MIPS-Toolchain, Skripte unter `mips/` bzw. `mips/extepla
 
 ```bash
 cd mips/exteplayer3-build
+./build-ffmpeg.sh
+./build.sh
+./package-ffmpeg-ipk.sh
+cd ..
+./build-serviceapp.sh
+./package-serviceapp-ipk.sh
+```
+
+### VTi 16 (VU+ Duo 4K Lite, armv7ahf)
+
+Eigener Unterbau (neuere glibc/libstdc++-ABI, FFmpeg 7.0.2 statt 6.1.1), Skripte unter `vti16/` bzw. `vti16/exteplayer3-build/`, greift für den gemeinsamen Quellcode und die Patches direkt auf `exteplayer3-build/` im Wurzelverzeichnis zurück:
+
+```bash
+cd vti16/exteplayer3-build
 ./build-ffmpeg.sh
 ./build.sh
 ./package-ffmpeg-ipk.sh
