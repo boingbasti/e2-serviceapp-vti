@@ -812,14 +812,16 @@ void eServiceApp::gotExtPlayerMessage(int message)
 void eServiceApp::recvMetadata(const std::string &radiotext, const std::string &title, const std::string &artist)
 {
 	m_radiotext = radiotext;
-	m_rtptext = radiotext;
+	/* Doppelzeilen im OSD vermeiden: RtpText nur setzen, wenn abweichend von RadioText */
+	m_rtptext = (title != radiotext && !title.empty()) ? title : "";
 	m_meta_title = title;
 	m_meta_artist = artist;
 
 	if (m_has_event_slot)
 	{
 		m_event_slot(this, evUpdatedRadioText);
-		m_event_slot(this, evUpdatedRtpText);
+		if (!m_rtptext.empty())
+			m_event_slot(this, evUpdatedRtpText);
 		m_event_slot(this, evUpdatedInfo);
 	}
 }

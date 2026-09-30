@@ -1292,6 +1292,14 @@ static void checkStreamMetadataUpdate(AVFormatContext *avContext)
     if (!avContext)
         return;
 
+    /* Wenn eine Videospur existiert, handelt es sich um ein Video oder TV:
+     * Header-Tags wie "title" sind kein Webradio-Radiotext. */
+    for (unsigned int i = 0; i < avContext->nb_streams; i++)
+    {
+        if (get_codecpar(avContext->streams[i])->codec_type == AVMEDIA_TYPE_VIDEO)
+            return;
+    }
+
     /* Quelle 1: ICY StreamTitle (Shoutcast/Icecast) */
     if (avContext->pb)
     {
