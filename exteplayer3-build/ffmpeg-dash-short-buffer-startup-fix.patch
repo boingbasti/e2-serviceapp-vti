@@ -1,33 +1,100 @@
 --- a/libavformat/dashdec.c
 +++ b/libavformat/dashdec.c
-@@ -1446,7 +1446,30 @@
+@@ -1434,11 +1434,12 @@
+     return ret;
+ }
+
++static int64_t calc_max_seg_no(struct representation *pls, DASHContext *c);
++
+ static int64_t calc_cur_seg_no(AVFormatContext *s, struct representation *pls)
+ {
+     DASHContext *c = s->priv_data;
+     int64_t num = 0;
+-    int64_t start_time_offset = 0;
+
+     if (c->is_live) {
+         if (pls->n_fragments) {
+@@ -1446,12 +1447,77 @@
              num = pls->first_seq_no;
          } else if (pls->n_timelines) {
              av_log(s, AV_LOG_TRACE, "in n_timelines mode\n");
 -            start_time_offset = get_segment_start_time_based_on_timeline(pls, 0xFFFFFFFF) - 60 * pls->fragment_timescale; // 60 seconds before end
-+            /* Live-Startposition bei <SegmentTimeline>: der urspruengliche Code
-+             * zog pauschal 60 Sekunden vom Ende der Timeline ab, unabhaengig von
-+             * der tatsaechlichen Puffergroesse (timeShiftBufferDepth). Bei kurzen
-+             * Puffern (z.B. ORF-DASH-Streams mit nur ca. 30s) liegt dieser Punkt
-+             * dann VOR dem Timeline-Beginn, calc_next_seg_no_from_timelines()
-+             * landet direkt auf dem aeltesten verfuegbaren Segment. Wenige
-+             * Sekunden spaeter verfaellt genau dieses Segment durch den
-+             * normalen Live-Puffer-Vorlauf, der dadurch erzwungene
-+             * Vorwaertssprung um eine volle Segmentlaenge loest unnoetig einen
-+             * PTS-Relearn aus (Cross-Anchor gegen eine zu diesem Zeitpunkt noch
-+             * nicht eingeschwungene Gegenspur -> dauerhafter Bild/Ton-Versatz).
-+             * Fix: ein im Manifest angegebenes suggestedPresentationDelay wird
-+             * bevorzugt verwendet (DASH-IF-IOP-Empfehlung, exakter als eine
-+             * Pauschale). Fehlt es, bleibt die bisherige 60s-Pauschale bestehen,
-+             * wird aber auf die tatsaechliche Puffergroesse begrenzt, damit sie
-+             * nie vor den Timeline-Beginn zurueckfaellt. */
-+            int64_t back_seconds = c->suggested_presentation_delay ? (int64_t)c->suggested_presentation_delay : 60;
-+            if (c->time_shift_buffer_depth > 0 && back_seconds > (int64_t)c->time_shift_buffer_depth) {
-+                back_seconds = (int64_t)c->time_shift_buffer_depth > 4 ? (int64_t)c->time_shift_buffer_depth - 2 : (int64_t)c->time_shift_buffer_depth / 2;
-+                if (back_seconds < 1)
-+                    back_seconds = 1;
+-            num = calc_next_seg_no_from_timelines(pls, start_time_offset);
+-            /* calc_next_seg_no_from_timelines() liefert jetzt bereits die
+-             * echte Segmentnummer inkl. first_seq_no (siehe dort) - nur noch
+-             * der -1-Sentinel (nicht gefunden) muss hier abgefangen werden. */
+-            if (num == -1)
++            /* Live-Startposition bei <SegmentTimeline>: fruehere Versuche
++             * rechneten den Startabstand in SEKUNDEN aus und suchten dann
++             * per Zeit-Vergleich (calc_next_seg_no_from_timelines) das
++             * passende Segment. Das bricht bei Sendern, deren Video exakt
++             * 6,000s-Segmente hat, deren Audio aber wegen 48kHz-Sample-
++             * Rundung zwischen 5,995s und 6,016s alterniert - ein winziger
++             * Rundungsunterschied reicht, um Video und Audio exakt ein
++             * Segment auseinanderlaufen zu lassen.
++             *
++             * Robusterer Ansatz: DASH-Streams mit SegmentTimeline haben laut
++             * Spezifikation fuer alle Adaptation-Sets dieselbe Anzahl an
++             * Segmenten in der Timeline (segmentAlignment). Statt eine
++             * Sekundenzahl in eine Segmentnummer umzurechnen (mit allen
++             * Rundungsrisiken), wird direkt in Segment-ANZAHL vom aktuellen
++             * Ende der Timeline zurueckgezaehlt - das liefert fuer Video und
++             * Audio garantiert denselben relativen Slot, unabhaengig von der
++             * jeweiligen Sekundenlaenge ihrer Segmente. Die Sekundenwerte
++             * (suggestedPresentationDelay, time_shift_buffer_depth) dienen
++             * nur noch dazu, EINMALIG eine ganzzahlige Segmentanzahl zu
++             * bestimmen - kleine Abweichungen in der geschaetzten
++             * Segmentdauer aendern dieses Ergebnis in der Praxis nicht. */
++            int64_t max_seg_no = calc_max_seg_no(pls, c);
++            int64_t timescale = pls->fragment_timescale;
++            int64_t duration_ticks = pls->timelines[0]->duration;
++            if (duration_ticks <= 0 || timescale <= 0) {
++                /* Entartetes Manifest ohne brauchbare Segmentdauer: Fallback
++                 * auf 6s/1 Tick-pro-Sekunde, damit die Rechnung unten nicht
++                 * durch Null teilt. */
++                duration_ticks = 6;
++                timescale = 1;
 +            }
-+            start_time_offset = get_segment_start_time_based_on_timeline(pls, 0xFFFFFFFF) - back_seconds * pls->fragment_timescale;
-             num = calc_next_seg_no_from_timelines(pls, start_time_offset);
-             /* calc_next_seg_no_from_timelines() liefert jetzt bereits die
-              * echte Segmentnummer inkl. first_seq_no (siehe dort) - nur noch
++            /* Eine fruehere Version dieses Fixes schaetzte die Segmentdauer
++             * per Ganzzahl-Division in SEKUNDEN (duration_ticks /
++             * fragment_timescale), was bei krummen Werten (z.B. 2304/600 =
++             * 3,84s) auf 3s abschneidet. Bei einem suggestedPresentationDelay
++             * von 24s ergab das ceil(24/3) = 8 Segmente Ruecksprung, bei nur
++             * ~8-9 Segmenten im Live-Puffer landete das exakt auf dem
++             * aeltesten, gleich verfallenden Segment - Paketverlust und
++             * PTS-Relearn-Sprung Sekunden nach dem Start. Fix: komplett in
++             * TIMELINE-TICKS rechnen (nie eine verlustbehaftete Sekunden-
++             * Zwischenstufe), und auf-/abrunden statt nur aufzurunden
++             * ((x + duration/2) / duration ist die ganzzahlige Variante von
++             * round(x / duration)). */
++            int64_t delay_seconds = c->suggested_presentation_delay ? (int64_t)c->suggested_presentation_delay : 60;
++            int64_t delay_ticks = delay_seconds * timescale;
++            int64_t margin_segments = (delay_ticks + duration_ticks / 2) / duration_ticks;
++            if (margin_segments < 3)
++                margin_segments = 3;
++            int64_t total_segs = max_seg_no - pls->first_seq_no + 1;
++            if (c->time_shift_buffer_depth > 0) {
++                int64_t buffer_ticks = (int64_t)c->time_shift_buffer_depth * timescale;
++                int64_t buffer_segments = buffer_ticks / duration_ticks;
++                if (buffer_segments > 0 && buffer_segments < total_segs)
++                    total_segs = buffer_segments;
++            }
++            /* Bei sehr kurzen Live-Puffern (z.B. nur ~8 Segmente a 3,84s)
++             * liess der obige margin_segments nur 1 Segment Sicherheitsabstand
++             * nach HINTEN zu pls->first_seq_no (der Verfallsgrenze) uebrig. Eine
++             * minimale Verzoegerung beim Verbindungsaufbau/Segment-Fetch reicht
++             * dann, damit dieses Segment serverseitig schon verfaellt, bevor es
++             * abgerufen wird - Paketverlust und PTS-Relearn-Sprung Sekunden nach
++             * dem Start. Fix: mindestens 2 Segmente Abstand auch nach hinten
++             * garantieren, auch wenn das den Abstand zur Live-Kante etwas
++             * verkleinert - bei Sendern mit grossem Puffer (z.B. 40 Segmente)
++             * bleibt das davon komplett unberuehrt, da margin_segments dort weit
++             * unter dieser Grenze liegt. */
++            int64_t max_safe_margin = total_segs > 5 ? (total_segs - 3) : (total_segs > 3 ? total_segs - 2 : 1);
++            if (margin_segments > max_safe_margin)
++                margin_segments = max_safe_margin;
++            num = max_seg_no - margin_segments;
++            if (num < pls->first_seq_no)
+                 num = pls->first_seq_no;
+         } else if (pls->fragment_duration){
+             /* DASH-IF-IOP-Fallback (Abschnitt 4.3.4.4): fehlt im Manifest sowohl

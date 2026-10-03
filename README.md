@@ -28,6 +28,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - MPEG-DASH-Unterstützung (`.mpd`) für Wiedergabe und Aufnahme, inklusive automatischer Bitraten-Auswahl mit Hardware-Decoder-Schutz (kein UHD-H.264 auf Boxen, die es nicht dekodieren können)
 - Titel und Interpret bei Webradio (ICY-StreamTitle, ID3-Tags) in Infobar und Frontdisplay über die `iRdsDecoder`-Schnittstelle von Enigma2
 - Tonspurwechsel bei Live-DASH-Streams mit mehreren Tonspuren ohne Bild-/Ton-Versatz, gleichnamige Spuren werden durchnummeriert
+- Deutlich schnelleres Spulen in bestimmten, über HTTP abgespielten Streams/Dateien ohne Index (lineare Byte-Schätzung statt FFmpegs binärer Suche)
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).

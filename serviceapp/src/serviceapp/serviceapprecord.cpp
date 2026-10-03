@@ -400,6 +400,13 @@ RESULT eServiceAppRecord::start(bool simulate)
 
 	SALOG("eServiceAppRecord::start: ENTER url=%s -> %s", m_ref.path.c_str(), m_filename.c_str());
 
+	// Wie bei eServiceApp::start() (siehe serviceapp.cpp): die Bouquet-URL kann
+	// einen "|key=value"-Header-Anhang tragen (Referer/User-Agent, siehe
+	// getHeaders() unten). FFmpeg kennt diese Syntax nicht, braucht die reine
+	// Netzwerk-URL als -i-Argument, sonst versucht es den gesamten Anhang als
+	// Teil der Adresse zu oeffnen und bricht sofort ab.
+	std::string cleanUrl = Url(m_ref.path).url();
+
 	std::vector<std::string> args;
 	args.push_back("/usr/bin/ffmpeg");
 	args.push_back("-y");
@@ -437,7 +444,7 @@ RESULT eServiceAppRecord::start(bool simulate)
 	}
 
 	args.push_back("-i");
-	args.push_back(m_ref.path);
+	args.push_back(cleanUrl);
 
 	// DASH liefert mehrere Bitraten-Varianten als getrennte Video-Streams im
 	// selben Input (anders als HLS, das exteplayer3 bereits beim Live-
@@ -449,9 +456,9 @@ RESULT eServiceAppRecord::start(bool simulate)
 	// isPotentialDashUrl()-Vorfilter stellt sicher, dass fuer alle anderen
 	// URLs (Zattoo, PlutoTV, HLS, lokale Dateien) ueberhaupt kein Oeffnungs-
 	// versuch/Netzwerk-Request stattfindet.
-	if (isPotentialDashUrl(m_ref.path))
+	if (isPotentialDashUrl(cleanUrl))
 	{
-		int32_t dashBestVideoIdx = probeDashBestVideoStream(m_ref.path, getServiceExt3HlsQualityMode());
+		int32_t dashBestVideoIdx = probeDashBestVideoStream(cleanUrl, getServiceExt3HlsQualityMode());
 		if (dashBestVideoIdx >= 0)
 		{
 			SALOG("eServiceAppRecord::start: DASH erkannt, waehle Video-Stream %d", dashBestVideoIdx);

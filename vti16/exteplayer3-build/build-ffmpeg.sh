@@ -29,7 +29,7 @@ if [ ! -f "${FFMPEG_TAR}" ]; then
     curl -L -O "${FFMPEG_URL}"
 fi
 
-if [ ! -d "ffmpeg-${FFMPEG_VER}/.patched" ]; then
+if [ ! -f "ffmpeg-${FFMPEG_VER}/.patched" ]; then
     if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
         echo "=== Entpacke FFmpeg ==="
         tar xf "${FFMPEG_TAR}"
@@ -48,6 +48,16 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}/.patched" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-subtitle-starvation-fix.patch" || true
     echo "=== Appliere DASH-Kurzpuffer-Startpositions-Fix (aus dem Wurzel-exteplayer3-build/) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-short-buffer-startup-fix.patch" || true
+    echo "=== Appliere DASH-Header-Parsing-Manifest-Freeze-Fix (aus dem Wurzel-exteplayer3-build/) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-header-parsing-manifest-freeze-fix.patch" || true
+    echo "=== Appliere Skyjet18-v183-Upstream-Sync (aus dem Wurzel-exteplayer3-build/) ==="
+    # ACHTUNG: webvttdec.c-Hunk schlaegt auf 7.0.2 fehl (FFInputFormat/.p.extensions
+    # statt AVInputFormat/.extensions, API-Umbau zwischen 6.1.1 und 7.0.2) - der
+    # "|| true" fängt das ab, die eigentliche .webvtt-Freischaltung ist stattdessen
+    # manuell direkt in webvttdec.c (.p.extensions = "vtt,webvtt") nachgezogen.
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-skyjet183-upstream-sync.patch" || true
+    echo "=== Appliere DASH-HTTP-Options-Fix (aus dem Wurzel-exteplayer3-build/) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-http-options.patch" || true
     touch "ffmpeg-${FFMPEG_VER}/.patched"
 fi
 

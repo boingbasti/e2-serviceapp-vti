@@ -1,0 +1,27 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -1915,6 +1915,24 @@
+          * (if this is in fact a HTTP request) */
+         av_dict_set_int(&opts, "offset", seg->url_offset, 0);
+         av_dict_set_int(&opts, "end_offset", seg->url_offset + seg->size, 0);
++        /* Byte-Range-Segment (z.B. SegmentBase, mehrere Segmente teilen sich
++         * eine Datei): Seekability/Reconnect explizit statt dem Default
++         * (-1/Auto) ueberlassen - robuster bei Verbindungsabbruch mitten im
++         * Range-Request. */
++        av_dict_set(&opts, "seekable", "1", 0);
++        av_dict_set(&opts, "reconnect", "1", 0);
++    } else {
++        /* Eigenstaendige Segmentdatei (z.B. .m4s per SegmentTemplate, der
++         * Normalfall) - http.c schickt bei seekable=-1 (Default/Auto) trotz
++         * offset=0 TROTZDEM unaufgefordert "Range: bytes=0-" mit (siehe
++         * http.c: "s->seekable != 0" greift auch bei -1). Fuer einen
++         * simplen Komplett-Download eines kleinen, eigenstaendigen Chunks
++         * ist das unnoetig und wird hier explizit unterdrueckt. Skyjet18
++         * loest dasselbe Problem ueber ein eigenes seg->seekable-Feld, das
++         * es hier in struct fragment nicht gibt - stattdessen wird direkt
++         * die bereits vorhandene Segmentgroesse geprueft. */
++        av_dict_set(&opts, "seekable", "0", 0);
++        av_dict_set(&opts, "multiple_requests", "1", 0);
+     }
+ 
+     ff_make_absolute_url(url, c->max_url_size, c->base_url, seg->url);

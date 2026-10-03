@@ -1,0 +1,132 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -171,6 +171,19 @@
+      * denselben Nullpunkt bekommen statt jeweils ihren eigenen. */
+     int64_t global_first_pts_us;
+
++    /* ORF1-Aufnahme-Versatz (ca. 3,8s = 1 Segmentlaenge): dash_read_header()
++     * ruft fuer jede Video-/Audio-/Untertitel-Repraesentation
++     * get_current_fragment() auf, die wiederum unbedingt refresh_manifest()
++     * aufruft - bei z.B. 5 Video- + 2 Audio-Repraesentationen also bis zu 7
++     * Netzwerk-Refreshs waehrend eines einzigen Header-Parse-Vorgangs.
++     * Veroeffentlicht der Server dazwischen ein neues Segment, berechnen
++     * spaeter initialisierte Spuren eine neue max_seg_no und starten ein
++     * Segment weiter vorn als frueher initialisierte Spuren (per Live-Trace
++     * bestaetigt). Dieses Flag haelt das Manifest waehrend der
++     * Komponenten-Initialisierung in dash_read_header() eingefroren, damit
++     * alle Spuren garantiert vom selben Snapshot ausgehen. */
++    int is_header_parsing;
++
+ } DASHContext;
+
+ static int ishttp(char *url)
+@@ -1651,6 +1665,12 @@
+ {
+     int ret = 0, i;
+     DASHContext *c = s->priv_data;
++    /* Waehrend dash_read_header() die Komponenten initialisiert, darf das
++     * Manifest nicht mehrfach nachgeladen werden (siehe is_header_parsing-
++     * Kommentar an der Struct-Definition) - alle Spuren sollen vom selben
++     * Snapshot ausgehen. */
++    if (c->is_header_parsing)
++        return 0;
+     // save current context
+     int n_videos = c->n_videos;
+     struct representation **videos = c->videos;
+@@ -2228,6 +2248,11 @@
+     int stream_index = 0;
+     int i;
+
++    /* Vorsorglich nullen (ein vorheriger fehlgeschlagener Oeffnungsversuch
++     * auf demselben Kontext koennte es sonst gesetzt gelassen haben). Erst
++     * unmittelbar vor der Komponenten-Initialisierung weiter unten wird es
++     * tatsaechlich aktiviert. */
++    c->is_header_parsing = 0;
+     c->interrupt_callback = &s->interrupt_callback;
+     c->global_first_pts_us = INT64_MIN;
+
+@@ -2248,18 +2273,28 @@
+     if(c->n_videos)
+         c->is_init_section_common_video = is_common_init_section_exist(c->videos, c->n_videos);
+
++    /* Siehe is_header_parsing-Kommentar an der Struct-Definition: waehrend
++     * dieser drei Schleifen (Video/Audio/Untertitel) darf refresh_manifest()
++     * nicht erneut vom Netz nachladen, sonst koennen spaeter initialisierte
++     * Spuren eine neuere max_seg_no als frueher initialisierte bekommen. */
++    c->is_header_parsing = 1;
++
+     /* Open the demuxer for video and audio components if available */
+     for (i = 0; i < c->n_videos; i++) {
+         rep = c->videos[i];
+         if (i > 0 && c->is_init_section_common_video) {
+             ret = copy_init_section(rep, c->videos[0]);
+-            if (ret < 0)
++            if (ret < 0) {
++                c->is_header_parsing = 0;
+                 return ret;
++            }
+         }
+         ret = open_demux_for_component(s, rep);
+
+-        if (ret)
++        if (ret) {
++            c->is_header_parsing = 0;
+             return ret;
++        }
+         rep->stream_index = stream_index;
+         ++stream_index;
+     }
+@@ -2271,13 +2306,17 @@
+         rep = c->audios[i];
+         if (i > 0 && c->is_init_section_common_audio) {
+             ret = copy_init_section(rep, c->audios[0]);
+-            if (ret < 0)
++            if (ret < 0) {
++                c->is_header_parsing = 0;
+                 return ret;
++            }
+         }
+         ret = open_demux_for_component(s, rep);
+
+-        if (ret)
++        if (ret) {
++            c->is_header_parsing = 0;
+             return ret;
++        }
+         rep->stream_index = stream_index;
+         ++stream_index;
+     }
+@@ -2289,17 +2328,23 @@
+         rep = c->subtitles[i];
+         if (i > 0 && c->is_init_section_common_subtitle) {
+             ret = copy_init_section(rep, c->subtitles[0]);
+-            if (ret < 0)
++            if (ret < 0) {
++                c->is_header_parsing = 0;
+                 return ret;
++            }
+         }
+         ret = open_demux_for_component(s, rep);
+
+-        if (ret)
++        if (ret) {
++            c->is_header_parsing = 0;
+             return ret;
++        }
+         rep->stream_index = stream_index;
+         ++stream_index;
+     }
+
++    c->is_header_parsing = 0;
++
+     if (!stream_index)
+         return AVERROR_INVALIDDATA;
+
+@@ -2486,6 +2531,7 @@
+     free_subtitle_list(c);
+     av_dict_free(&c->avio_opts);
+     av_freep(&c->base_url);
++    c->is_header_parsing = 0;
+     return 0;
+ }
+

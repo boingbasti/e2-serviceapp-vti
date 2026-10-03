@@ -8,12 +8,12 @@ PKGDIR="${BUILDDIR}/ffmpeg-ipk"
 PREFIX="${BUILDDIR}/ffmpeg-build-out"
 OUTDIR="${BUILDDIR}/../../release"
 
-VERSION="1:182"
+VERSION="1:183"
 # Siehe package-serviceapp-ipk.sh fuer die Begruendung der Trennung
 # zwischen echtem opkg-Architektur-Tag und reinem Dateinamens-Suffix.
 ARCH_TAG="armv7ahf-neon"
 FILE_SUFFIX="armv7ahf-vti16"
-IPK_NAME="ffmpeg_vti_1_182_${FILE_SUFFIX}.ipk"
+IPK_NAME="ffmpeg_vti_1_183_${FILE_SUFFIX}.ipk"
 
 if [ ! -f "${BUILDDIR}/ffmpeg-bin/ffmpeg" ]; then
     echo "FEHLER: ffmpeg-bin/ffmpeg nicht gefunden — erst build-ffmpeg.sh ausführen!"
@@ -48,7 +48,7 @@ License: GPL-2.0
 Architecture: ${ARCH_TAG}
 OE: ffmpeg
 Homepage: https://www.ffmpeg.org/
-Depends: libc6 (>= 2.40), exteplayer3 (= 1:182+vti001), libxml2
+Depends: libc6 (>= 2.40), exteplayer3 (= 1:183+vti001), libxml2
 Source: https://ffmpeg.org/releases/ffmpeg-7.0.2.tar.xz
 EOF
 

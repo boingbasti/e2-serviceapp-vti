@@ -37,6 +37,12 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-subtitle-starvation-fix.patch"
     echo "=== Appliere DASH-Kurzpuffer-Startpositions-Fix (SegmentTimeline, kurzer timeShiftBufferDepth) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-short-buffer-startup-fix.patch"
+    echo "=== Appliere DASH-Header-Parsing-Manifest-Freeze-Fix (aus dem Wurzel-exteplayer3-build/) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-header-parsing-manifest-freeze-fix.patch"
+    echo "=== Appliere Skyjet18-v183-Upstream-Sync (aus dem Wurzel-exteplayer3-build/) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-skyjet183-upstream-sync.patch"
+    echo "=== Appliere DASH-HTTP-Options-Fix (aus dem Wurzel-exteplayer3-build/) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-http-options.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"

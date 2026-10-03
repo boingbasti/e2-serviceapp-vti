@@ -8,9 +8,9 @@ PKGDIR="${BUILDDIR}/ffmpeg-ipk"
 PREFIX="${BUILDDIR}/ffmpeg-build-out"
 OUTDIR="${BUILDDIR}/../../release"
 
-VERSION="1:182"
+VERSION="1:183"
 ARCH="mips32el"
-IPK_NAME="ffmpeg_vti_1_182_mips32el.ipk"
+IPK_NAME="ffmpeg_vti_1_183_mips32el.ipk"
 
 if [ ! -f "${BUILDDIR}/ffmpeg-bin/ffmpeg" ]; then
     echo "FEHLER: ffmpeg-bin/ffmpeg nicht gefunden — erst build-ffmpeg.sh ausführen!"
@@ -48,7 +48,7 @@ License: GPL-2.0
 Architecture: ${ARCH}
 OE: ffmpeg
 Homepage: https://www.ffmpeg.org/
-Depends: libc6 (>= 2.20), exteplayer3 (= 1:182+vti001), libxml2
+Depends: libc6 (>= 2.20), exteplayer3 (= 1:183+vti001), libxml2
 Source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
 EOF
 

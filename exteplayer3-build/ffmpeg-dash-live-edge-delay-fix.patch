@@ -54,39 +54,40 @@
              }
          }
      } else {
-@@ -1683,8 +1715,27 @@
-         if (pls->cur_seq_no <= min_seq_no) {
+@@ -1684,7 +1716,29 @@
              av_log(pls->parent, AV_LOG_VERBOSE, "old fragment: cur[%"PRId64"] min[%"PRId64"] max[%"PRId64"]\n", (int64_t)pls->cur_seq_no, min_seq_no, max_seq_no);
              pls->cur_seq_no = calc_cur_seg_no(pls->parent, pls);
--        } else if (pls->cur_seq_no > max_seq_no) {
+         } else if (pls->cur_seq_no > max_seq_no) {
 -            av_log(pls->parent, AV_LOG_VERBOSE, "new fragment: min[%"PRId64"] max[%"PRId64"]\n", min_seq_no, max_seq_no);
-+        } else {
-+            /* Dauerhafter Sicherheitsabstand zur Live-Kante (nicht nur beim
-+             * Start): der Demuxer liest hier mit ueber 1x Echtzeitgeschwindigkeit
-+             * vor (beim ZDF-Stream ca. 1,3x, live per ffmpeg-Testlauf gemessen),
-+             * wodurch jedes rein einmalige Start-Delay nach kurzer Zeit
-+             * komplett aufgebraucht ist und cur_seq_no dauerhaft exakt auf
-+             * max_seq_no reitet - jede kleine CDN-Verzoegerung fuehrt dann zu
-+             * 404 und einer PTS-Luecke. Zwei Segmente Abstand zu max_seq_no
-+             * halten den Demuxer dauerhaft in sicherem Terrain, unabhaengig
-+             * davon wie schnell er vorlesen will. */
-+            int64_t cdn_safe_max = max_seq_no > (pls->first_seq_no + 2) ? (max_seq_no - 2) : pls->first_seq_no;
-+            if (pls->cur_seq_no > cdn_safe_max) {
-+                av_log(pls->parent, AV_LOG_VERBOSE, "waiting for live fragment: cur[%"PRId64"] max[%"PRId64"] safe_max[%"PRId64"]\n", (int64_t)pls->cur_seq_no, max_seq_no, cdn_safe_max);
-+                int wait_count = 0;
-+                while (pls->cur_seq_no > cdn_safe_max && wait_count < 25 && !ff_check_interrupt(c->interrupt_callback)) {
-+                    av_usleep(200 * 1000);
-+                    wait_count++;
-+                    max_seq_no = calc_max_seg_no(pls, c);
-+                    cdn_safe_max = max_seq_no > (pls->first_seq_no + 2) ? (max_seq_no - 2) : pls->first_seq_no;
-+                }
++            /* Live-Kante erreicht: das angeforderte Segment ist noch nicht im
++             * Manifest gelistet (der Demuxer liest schneller als Echtzeit
++             * vor). Statt blind anzufragen (Original-FFmpeg: 404, Abbruch
++             * nach 3 Fehlversuchen) oder starr zu schlafen/zurueckzuklemmen
++             * ohne neue Information zu holen (beide fruehere, inzwischen
++             * verworfene Varianten hier: die erste drifted mit der Zeit weg,
++             * die zweite fror durch eine Endlosschleife komplett ein), aktiv
++             * das Manifest neu laden, bis der Server das naechste Segment
++             * veroeffentlicht hat - das ist die einzige Variante, die echte
++             * neue Information holt statt zu raten. Gilt bewusst fuer alle
++             * Live-Modi gleich (auch ohne SegmentTimeline schadet ein
++             * zusaetzlicher refresh_manifest() hier nicht). */
++            int wait_count = 0;
++            while (pls->cur_seq_no > max_seq_no && wait_count < 20 && !ff_check_interrupt(c->interrupt_callback)) {
++                av_usleep(500 * 1000);
++                wait_count++;
++                refresh_manifest(pls->parent);
++                max_seq_no = calc_max_seg_no(pls, c);
++            }
++            if (pls->cur_seq_no > max_seq_no) {
++                av_log(pls->parent, AV_LOG_WARNING, "live edge wait timeout: cur[%"PRId64"] max[%"PRId64"]\n",
++                       (int64_t)pls->cur_seq_no, max_seq_no);
 +            }
          }
          seg = av_mallocz(sizeof(struct fragment));
          if (!seg) {
-@@ -1852,6 +1903,20 @@
+@@ -1852,6 +1906,20 @@
              goto end;
- 
+
          ret = open_input(c, v, v->cur_seg);
 +        if (ret < 0 && c->is_live && !ff_check_interrupt(c->interrupt_callback)) {
 +            /* Bei Live-Streams, die auf der Live-Kante reiten (siehe

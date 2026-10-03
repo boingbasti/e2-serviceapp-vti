@@ -37,6 +37,12 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-subtitle-starvation-fix.patch"
     echo "=== Appliere DASH-Kurzpuffer-Startpositions-Fix (SegmentTimeline, kurzer timeShiftBufferDepth) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-short-buffer-startup-fix.patch"
+    echo "=== Appliere DASH-Header-Parsing-Manifest-Freeze-Fix (Aufnahme-Startversatz bei mehreren Repraesentationen) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-header-parsing-manifest-freeze-fix.patch"
+    echo "=== Appliere Skyjet18-v183-Upstream-Sync (Ampersand-BaseURL, erstes Segment, HLS-Event-Playlists, ueberlaufsicherer dash_seek, .webvtt) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-skyjet183-upstream-sync.patch"
+    echo "=== Appliere DASH-HTTP-Options-Fix (kein unaufgefordertes Range bei eigenstaendigen Segmentdateien) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-http-options.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"

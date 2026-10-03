@@ -1,0 +1,147 @@
+--- a/libavformat/dashdec.c
++++ b/libavformat/dashdec.c
+@@ -847,7 +847,14 @@
+                 memset(p + 1, 0, strlen(p));
+             }
+             av_strlcat(tmp_str, text + start, tmp_max_url_size);
+-            xmlNodeSetContent(baseurl_nodes[i], tmp_str);
++            {
++                /* Kaufmanns-Und (&) im Pfad (z.B. Session-Tokens/CDN-Keys) muss
++                 * XML-maskiert werden, sonst zerlegt libxml2 die URL beim
++                 * naechsten Reparse falsch (FFmpeg-Ticket #7395). */
++                xmlChar *escaped = xmlEncodeSpecialChars(NULL, (const xmlChar *)tmp_str);
++                xmlNodeSetContent(baseurl_nodes[i], escaped);
++                xmlFree(escaped);
++            }
+             updated = 1;
+             xmlFree(text);
+         }
+@@ -1802,7 +1809,11 @@
+         if (pls->timelines || pls->fragments) {
+             refresh_manifest(pls->parent);
+         }
+-        if (pls->cur_seq_no <= min_seq_no) {
++        /* "<" statt "<=": cur_seq_no == min_seq_no ist das aelteste noch
++         * GUELTIGE Segment, kein abgelaufenes - mit "<=" wuerde es faelschlich
++         * als zu alt verworfen und ein unnoetiger Vorwaertssprung ausgeloest
++         * (Skyjet18, Commit 8be30eced). */
++        if (pls->cur_seq_no < min_seq_no) {
+             av_log(pls->parent, AV_LOG_VERBOSE, "old fragment: cur[%"PRId64"] min[%"PRId64"] max[%"PRId64"]\n", (int64_t)pls->cur_seq_no, min_seq_no, max_seq_no);
+             pls->cur_seq_no = calc_cur_seg_no(pls->parent, pls);
+         } else if (pls->cur_seq_no > max_seq_no) {
+@@ -2570,13 +2581,23 @@
+                 duration = pls->timelines[i]->starttime;
+             }
+             duration += pls->timelines[i]->duration;
+-            if (seek_pos_msec < ((duration * 1000) /  pls->fragment_timescale)) {
++            /* av_rescale() statt "(duration * 1000) / timescale": bei sehr
++             * langen Timelines kann "duration * 1000" ueberlaufen, bevor
++             * geteilt wird. av_rescale() rechnet das intern ueberlaufsicher
++             * (128-Bit-Zwischenergebnis), OHNE die Rundungsgenauigkeit zu
++             * verlieren, die ein vorgezogenes "/timescale" kosten wuerde
++             * (genau diese Art von verfrueher Division hatte bereits einen
++             * eigenen Bug verursacht - Skyjet18s eigene Loesung (Commit
++             * 8138894bd) klammert stattdessen einfach um und nimmt den
++             * Praezisionsverlust in Kauf, das wird hier bewusst NICHT
++             * uebernommen). */
++            if (seek_pos_msec < av_rescale(duration, 1000, pls->fragment_timescale)) {
+                 goto set_seq_num;
+             }
+             for (j = 0; j < pls->timelines[i]->repeat; j++) {
+                 duration += pls->timelines[i]->duration;
+                 num++;
+-                if (seek_pos_msec < ((duration * 1000) /  pls->fragment_timescale)) {
++                if (seek_pos_msec < av_rescale(duration, 1000, pls->fragment_timescale)) {
+                     goto set_seq_num;
+                 }
+             }
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -312,6 +312,27 @@
+     c->n_renditions = 0;
+ }
+
++/* EVENT-Playlists (#EXT-X-PLAYLIST-TYPE:EVENT, z.B. laufende Sport-
++ * uebertragungen/Konzerte) wachsen wie Live-Streams, erlauben aber -
++ * anders als echtes Live - Spulen im bereits gesendeten Verlauf. Die
++ * Gesamtdauer muss daher wie bei VOD ("finished") aus der Summe aller
++ * bisher bekannten Segmente berechnet werden, aber bei jedem Manifest-
++ * Refresh neu (nicht nur einmalig beim Oeffnen), da neue Segmente
++ * laufend dazukommen (Skyjet18, Commit 9417c033d). */
++static void update_duration(AVFormatContext *s)
++{
++    HLSContext *c = s->priv_data;
++    int i;
++
++    if (c->n_variants > 0 && (c->variants[0]->playlists[0]->finished ||
++                               c->variants[0]->playlists[0]->type == PLS_TYPE_EVENT)) {
++        int64_t duration = 0;
++        for (i = 0; i < c->variants[0]->playlists[0]->n_segments; i++)
++            duration += c->variants[0]->playlists[0]->segments[i]->duration;
++        s->duration = duration;
++    }
++}
++
+ static struct playlist *new_playlist(HLSContext *c, const char *url,
+                                      const char *base)
+ {
+@@ -1040,6 +1061,8 @@
+         !(c->variants[0]->playlists[0]->finished ||
+           c->variants[0]->playlists[0]->type == PLS_TYPE_EVENT))
+         c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;
++
++    update_duration(c->ctx);
+     return ret;
+ }
+
+@@ -1736,13 +1759,16 @@
+
+     /* If playback is already in progress (we are just selecting a new
+      * playlist) and this is a complete file, find the matching segment
+-     * by counting durations. */
+-    if (pls->finished && c->cur_timestamp != AV_NOPTS_VALUE) {
++     * by counting durations. EVENT-Playlists (siehe update_duration()
++     * weiter oben) werden hier wie "finished" behandelt, da bei ihnen
++     * ebenfalls per Zeitstempel innerhalb des bisherigen Verlaufs gesucht
++     * werden darf (Skyjet18, Commit 9417c033d). */
++    if ((pls->finished || pls->type == PLS_TYPE_EVENT) && c->cur_timestamp != AV_NOPTS_VALUE) {
+         find_timestamp_in_playlist(c, pls, c->cur_timestamp, &seq_no, NULL);
+         return seq_no;
+     }
+
+-    if (!pls->finished) {
++    if (!pls->finished && pls->type != PLS_TYPE_EVENT) {
+         if (!c->first_packet && /* we are doing a segment selection during playback */
+             c->cur_seq_no >= pls->start_seq_no &&
+             c->cur_seq_no < pls->start_seq_no + pls->n_segments)
+@@ -2095,9 +2121,17 @@
+         }
+     }
+
+-    /* If this isn't a live stream, calculate the total duration of the
+-     * stream. */
+-    if (c->variants[best_variant_idx]->playlists[0]->finished) {
++    /* Wenn das kein echter Live-Stream ist (VOD "finished") ODER eine
++     * EVENT-Playlist (laeuft wie Live, erlaubt aber Spulen im bisherigen
++     * Verlauf, z.B. laufende Sportuebertragung/Konzert), die Gesamtdauer
++     * aus der Summe aller bisher bekannten Segmente des TATSAECHLICH
++     * gewaehlten Varianten-Streams berechnen (best_variant_idx, nicht
++     * pauschal Variante 0 - bei Mehrbitraten-Manifesten ist Variante 0
++     * nicht zwingend die abgespielte). Fuer EVENT-Playlists aktualisiert
++     * update_duration() (siehe dort) das bei jedem Manifest-Refresh erneut,
++     * da dort laufend neue Segmente dazukommen (Skyjet18, Commit 9417c033d). */
++    if (c->variants[best_variant_idx]->playlists[0]->finished ||
++        c->variants[best_variant_idx]->playlists[0]->type == PLS_TYPE_EVENT) {
+         int64_t duration = 0;
+         for (i = 0; i < c->variants[best_variant_idx]->playlists[0]->n_segments; i++)
+             duration += c->variants[best_variant_idx]->playlists[0]->segments[i]->duration;
+--- a/libavformat/webvttdec.c
++++ b/libavformat/webvttdec.c
+@@ -220,6 +220,6 @@
+     .read_packet    = webvtt_read_packet,
+     .read_seek2     = webvtt_read_seek,
+     .read_close     = webvtt_read_close,
+-    .extensions     = "vtt",
++    .extensions     = "vtt,webvtt",
+     .priv_class     = &webvtt_demuxer_class,
+ };

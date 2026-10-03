@@ -118,6 +118,13 @@ static int32_t restart_audio_resampling = 0;
 static int64_t g_seek_target_seconds = 0;
 static bool g_do_seek_target_seconds = false;
 static bool g_seek_flush_only = false; /* nur Puffer/Stamp neu, kein Seek, PTS-Zustand bleibt */
+/* Relativer 0-Sekunden-Seek (interner Flush bei Ton-/Untertitelspurwechsel,
+ * siehe container_ffmpeg_switch_audio()/container_ffmpeg_switch_subtitle()):
+ * muss vom schnellen HTTP-MPEG-TS-Byte-Seek unten ausgenommen bleiben, sonst
+ * wuerde ein reiner Spurwechsel bei VBR-Streams durch die lineare Byte-
+ * Schaetzung einen kleinen, ungewollten Zeitsprung verursachen (vgl. das
+ * verwandte Thema bei DASH-Live-Sendern). */
+static bool g_is_zero_seek = false;
 static void *g_stamp;
 
 /* ***************************** */
@@ -1479,8 +1486,18 @@ static void FFMPEGThread(Context_t *context)
 
     // for seek
     int64_t seek_target_seconds = 0;
+    /* Unveraenderte Kopie von g_seek_target_seconds, bevor seek_target_seconds
+     * weiter unten pro Kontext um start_time erhoeht wird - fuer den HTTP-
+     * MPEG-TS-Byte-Seek, der die reine Zielzeit ab Stream-Anfang braucht.
+     * Muss wie seek_target_seconds selbst innerhalb des Mutex uebernommen
+     * werden, sonst koennte ein zwischenzeitlicher neuer Seek-Aufruf (z.B.
+     * ein Flush-Seek bei Spurwechsel, der g_seek_target_seconds auf 0 setzt)
+     * hier einen Wert liefern, der nicht mehr zu stamp/flush_only/is_zero_seek
+     * dieser Iteration passt. */
+    int64_t raw_seek_target_seconds = 0;
     bool do_seek_target_seconds = false;
     bool flush_only = false;
+    bool is_zero_seek = false;
 
     int64_t seek_target_bytes = 0;
     bool do_seek_target_bytes = false;
@@ -1556,9 +1573,12 @@ static void FFMPEGThread(Context_t *context)
         {
             do_seek_target_seconds = g_do_seek_target_seconds;
             seek_target_seconds = g_seek_target_seconds;
+            raw_seek_target_seconds = g_seek_target_seconds;
             stamp = g_stamp;
             flush_only = g_seek_flush_only;
             g_seek_flush_only = false;
+            is_zero_seek = g_is_zero_seek;
+            g_is_zero_seek = false;
             g_do_seek_target_seconds = false;
         }
         releaseSeekMutex();
@@ -1589,8 +1609,94 @@ static void FFMPEGThread(Context_t *context)
                          * Lesefehler an der neuen Position faelschlich sofortiges
                          * Schliessen statt der Netzwerk-Gnadenfrist ausloesen. */
                         isEOFReached[i] = 0;
-                        //av_seek_frame(avContextTab[i], -1, seek_target_seconds, 0);
-                        avformat_seek_file(avContextTab[i], -1, INT64_MIN, seek_target_seconds, INT64_MAX, 0);
+
+                        int seek_done = 0;
+                        /* Schneller Byte-Seek fuer HTTP-MPEG-TS-Streams (z.B. ueber ein
+                         * Drittanbieter-Plugin wiedergegebene Timeshift-URLs, Typ 4097):
+                         * MPEG-TS hat keine Index-Tabelle, ein Zeitstempel-Seek zwingt FFmpeg (seek.c) in
+                         * ff_seek_frame_binary() - eine binaere Intervallsuche mit bis zu
+                         * 25 Einzelschritten. Jeder Schritt schliesst/oeffnet bei HTTP eine
+                         * komplett neue TCP-Verbindung (http.c: http_seek_internal()), macht
+                         * 30-40s Verzoegerung bei normaler Internet-Latenz. GStreamer ("original")
+                         * umgeht das bei MPEG-TS/HTTP mit einer linearen Byte-Schaetzung und
+                         * genau einem HTTP-Range-Request - das wird hier nachgebildet mit
+                         * AVSEEK_FLAG_BYTE, sofern Dateigroesse und Gesamtdauer bekannt sind.
+                         * Kompromiss: bei stark schwankender Bitrate (VBR) kann der Sprung ein
+                         * paar Sekunden neben dem exakten Ziel landen statt frame-genau zu sein -
+                         * derselbe akzeptierte Kompromiss wie bei GStreamer.
+                         * is_zero_seek (interner 0-Sekunden-Flush beim Ton-/Untertitelspur-
+                         * wechsel, siehe g_is_zero_seek) wird bewusst ausgenommen: ohne diese
+                         * Ausnahme wuerde ein reiner Spurwechsel bei VBR-Streams durch die
+                         * Byte-Schaetzung einen kleinen, ungewollten Zeitsprung verursachen. */
+                        if (!is_zero_seek && avContextTab[i]->pb && avContextTab[i]->iformat &&
+                            0 == strncmp(avContextTab[i]->iformat->name, "mpegts", 6) &&
+                            avContextTab[i]->url &&
+                            (0 == strncmp(avContextTab[i]->url, "http://", 7) || 0 == strncmp(avContextTab[i]->url, "https://", 8)))
+                        {
+                            int64_t file_size = avio_size(avContextTab[i]->pb);
+                            int64_t total_duration = avContextTab[i]->duration;
+                            if (total_duration <= 0)
+                            {
+                                Track_t *trk = NULL;
+                                if (context->manager->video && context->manager->video->Command(context, MANAGER_GET_TRACK, &trk) >= 0 && trk && trk->duration > 0)
+                                    total_duration = trk->duration * 1000;
+                                else if (context->manager->audio && context->manager->audio->Command(context, MANAGER_GET_TRACK, &trk) >= 0 && trk && trk->duration > 0)
+                                    total_duration = trk->duration * 1000;
+                            }
+
+                            /* Dynamische Dauer-Schaetzung ueber bisher gelesene Bytes und PTS,
+                             * falls der Stream-Header keine Gesamtdauer enthaelt: */
+                            if (file_size > 0 && total_duration <= 0)
+                            {
+                                int64_t cur_bytes = avio_tell(avContextTab[i]->pb);
+                                if (cur_bytes > 0 && latestPts > 0)
+                                {
+                                    int64_t elapsed_us = av_rescale(latestPts, AV_TIME_BASE, 90000);
+                                    if (elapsed_us > 0)
+                                    {
+                                        total_duration = av_rescale(file_size, elapsed_us, cur_bytes);
+                                    }
+                                }
+                            }
+
+                            if (file_size > 0 && total_duration > 0)
+                            {
+                                /* WICHTIG: Fuer den Byte-Seek muss raw_seek_target_seconds (relative
+                                 * Zeit ab Stream-Anfang, unveraendert seit der Mutex-geschuetzten
+                                 * Uebernahme oben) genutzt werden, NICHT die globale
+                                 * g_seek_target_seconds direkt: seek_target_seconds enthaelt ab hier
+                                 * avContextTab[i]->start_time (Sende-PTS von zig Stunden), was bei
+                                 * Division durch total_duration die Dateigroesse um ein Vielfaches
+                                 * uebersteigen und sofort ans Dateiende (EOF) springen wuerde. Ein
+                                 * direkter Zugriff auf die globale Variable waere ausserdem
+                                 * ungeschuetzt (einzige Stelle in dieser Datei ohne
+                                 * getSeekMutex()/releaseSeekMutex()) und koennte durch einen
+                                 * zwischenzeitlich eintreffenden neuen Seek-Aufruf (z.B. einen
+                                 * Flush-Seek bei Spurwechsel, der g_seek_target_seconds auf 0
+                                 * setzt) einen Wert liefern, der nicht mehr zu stamp/flush_only/
+                                 * is_zero_seek dieser Iteration passt. */
+                                int64_t target_byte = av_rescale(raw_seek_target_seconds, file_size, total_duration);
+                                target_byte = (target_byte / 188) * 188;
+                                if (target_byte < 0)
+                                    target_byte = 0;
+                                if (target_byte >= file_size)
+                                    target_byte = (file_size > 188) ? (file_size - 188) : 0;
+
+                                ffmpeg_printf(10, "HTTP MPEG-TS fast byte seek: target_byte[%"PRId64"] file_size[%"PRId64"] duration[%"PRId64"]\n",
+                                              target_byte, file_size, total_duration);
+
+                                if (avformat_seek_file(avContextTab[i], -1, INT64_MIN, target_byte, INT64_MAX, AVSEEK_FLAG_BYTE) >= 0)
+                                {
+                                    seek_done = 1;
+                                }
+                            }
+                        }
+
+                        if (!seek_done)
+                        {
+                            //av_seek_frame(avContextTab[i], -1, seek_target_seconds, 0);
+                            avformat_seek_file(avContextTab[i], -1, INT64_MIN, seek_target_seconds, INT64_MAX, 0);
+                        }
                     }
                     else
                     {
@@ -4383,8 +4489,13 @@ static int32_t container_ffmpeg_seek(Context_t *context, int64_t sec, uint8_t ab
     Track_t *videoTrack = NULL;
     Track_t *audioTrack = NULL;
     Track_t *current = NULL;
+    /* Muss auf Funktionsebene (nicht im folgenden if-Block) stehen und VOR
+     * jeder Verrechnung von sec ausgewertet werden: ein relativer 0-Sekunden-
+     * Seek ist der interne Flush bei Ton-/Untertitelspurwechsel (siehe
+     * g_is_zero_seek weiter unten), kein echter Zeitsprung. */
+    bool is_relative_zero = (!absolute && sec == 0);
 
-    if (!absolute) 
+    if (!absolute)
     {
         ffmpeg_printf(10, "seeking %"PRId64" sec\n", sec);
 
@@ -4450,6 +4561,7 @@ static int32_t container_ffmpeg_seek(Context_t *context, int64_t sec, uint8_t ab
 
     getSeekMutex();
     g_seek_target_seconds = sec * AV_TIME_BASE;
+    g_is_zero_seek = is_relative_zero;
     g_do_seek_target_seconds = true;
     g_stamp = context->playback->stamp;
     releaseSeekMutex();

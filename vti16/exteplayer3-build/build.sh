@@ -1,7 +1,7 @@
 #!/bin/bash
 # Baut exteplayer3 für VTi16 (armv7ahf, Duo 4K Lite/SE), verlinkt gegen das
 # selbst gebaute FFmpeg 7.0.2.
-# Ergebnis: release/exteplayer3_vti_1_182+vti001_armv7ahf-vti16.ipk
+# Ergebnis: release/exteplayer3_vti_1_183+vti001_armv7ahf-vti16.ipk
 #
 # Unterschiede zum VTi15-Pendant:
 # - Kein glibc_compat.c mehr (nicht noetig, VTi16s glibc ist neu genug).
@@ -96,7 +96,7 @@ mkdir -p repack/ctrl_root
 # compatible architecture" abgelehnt. Der Dateiname traegt "-vti16" trotzdem
 # rein zur eigenen Unterscheidung von den VTi15-Paketen (install.sh waehlt
 # per Dateiname aus, nicht per Architecture:-Feld).
-echo -e "Package: exteplayer3\nVersion: 1:182+vti001\nDescription: exteplayer3 - media player for E2 (VTi16-Build), built from skyjet18/exteplayer3 master (Version 182). Includes FFmpeg 7.0.2 shared libraries in /usr/lib/exteplayer3_deps/.\nSection: libs\nPriority: optional\nMaintainer: saufsoldat\nLicense: GPL-2.0\nHomepage: https://github.com/boingbasti/e2-serviceapp-vti\nArchitecture: armv7ahf-neon\nOE: exteplayer3\nDepends: libc6 (>= 2.40), libxml2\nSource: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https" > repack/ctrl_root/control
+echo -e "Package: exteplayer3\nVersion: 1:183+vti001\nDescription: exteplayer3 - media player for E2 (VTi16-Build), built from skyjet18/exteplayer3 master (Version 183). Includes FFmpeg 7.0.2 shared libraries in /usr/lib/exteplayer3_deps/.\nSection: libs\nPriority: optional\nMaintainer: saufsoldat\nLicense: GPL-2.0\nHomepage: https://github.com/boingbasti/e2-serviceapp-vti\nArchitecture: armv7ahf-neon\nOE: exteplayer3\nDepends: libc6 (>= 2.40), libxml2\nSource: git://github.com/skyjet18/exteplayer3.git;branch=master;protocol=https" > repack/ctrl_root/control
 echo "2.0" > repack/debian-binary
 cp $BUILDDIR/exteplayer3_new repack/data_root/usr/bin/exteplayer3
 chmod 755 repack/data_root/usr/bin/exteplayer3
@@ -106,5 +106,5 @@ rm -f repack/data_root/usr/lib/exteplayer3_deps/libz.so*
 tar czf repack/data.tar.gz -C repack/data_root --owner=0 --group=0 ./usr
 tar czf repack/control.tar.gz -C repack/ctrl_root --owner=0 --group=0 ./control
 mkdir -p "${BUILDDIR}/../../release"
-ar rcs "${BUILDDIR}/../../release/exteplayer3_vti_1_182+vti001_armv7ahf-vti16.ipk" repack/debian-binary repack/data.tar.gz repack/control.tar.gz
-echo "IPK: $(ls -lh "${BUILDDIR}/../../release/exteplayer3_vti_1_182+vti001_armv7ahf-vti16.ipk")"
+ar rcs "${BUILDDIR}/../../release/exteplayer3_vti_1_183+vti001_armv7ahf-vti16.ipk" repack/debian-binary repack/data.tar.gz repack/control.tar.gz
+echo "IPK: $(ls -lh "${BUILDDIR}/../../release/exteplayer3_vti_1_183+vti001_armv7ahf-vti16.ipk")"

@@ -65,7 +65,7 @@
 
      if ((ret = ffio_copy_url_options(s->pb, &c->avio_opts)) < 0)
          return ret;
-@@ -2248,13 +2270,40 @@
+@@ -2248,13 +2270,39 @@
      while (!ff_check_interrupt(c->interrupt_callback) && !ret) {
          ret = av_read_frame(cur->ctx, pkt);
          if (ret >= 0) {
@@ -106,5 +106,5 @@
                      av_log(c, AV_LOG_TRACE, "Setting first PTS to pos[%" PRId64 "] for %s\n", cur->first_pts, cur->id);
 -                    cur->first_pts = pkt->pts;
                  }
-
+ 
                  pkt->pts -= cur->first_pts;
