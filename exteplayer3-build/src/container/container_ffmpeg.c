@@ -3494,7 +3494,13 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                     for (m = 0; m < p->nb_stream_indexes; m++)
                     {
                         AVStream *s = avContext->streams[p->stream_index[m]];
-                        if (get_codecpar(s)->codec_type == AVMEDIA_TYPE_VIDEO && get_codecpar(s)->width > 0)
+                        /* Nicht auf width > 0 pruefen: ohne avformat_find_stream_info
+                         * (noprobe) ist die Bildgroesse beim Oeffnen bei manchen HLS-Streams
+                         * noch 0. Dann fand keine Variante "hasVideo", best blieb NULL und es
+                         * gewann stillschweigend die erste Variante (bei aufsteigend
+                         * sortierten Playlists die kleinste). */
+                        if (get_codecpar(s)->codec_type == AVMEDIA_TYPE_VIDEO &&
+                            !(s->disposition & AV_DISPOSITION_ATTACHED_PIC))
                         {
                             hasVideo = 1;
                             break;
