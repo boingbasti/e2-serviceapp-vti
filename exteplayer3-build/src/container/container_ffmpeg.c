@@ -990,7 +990,8 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                                          int64_t *packetCounterAtLastGoodPts,
                                          time_t *wallClockAtLastGoodPts,
                                          bool *outTrusted,
-                                         int64_t *sessionBasePts)
+                                         int64_t *sessionBasePts,
+                                         bool suppressDeltaLearning)
 {
     bool otherTrackFresh = (otherTrackLastGoodPts >= 0) &&
             ((totalPacketCounter - otherTrackPacketCounterAtLastGood) < OTHER_TRACK_FRESHNESS_LIMIT);
@@ -1077,8 +1078,15 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                      * in knownGoodAVDelta einsickern (siehe Kommentar an
                      * PtsOffsetCacheEntry_t.trusted). resumedFromLongFreeze
                      * faengt zusaetzlich den Fall ab, dass beide Spuren
-                     * gleichzeitig lange standen (siehe feedAVDeltaSample). */
-                    feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+                     * gleichzeitig lange standen (siehe feedAVDeltaSample).
+                     * suppressDeltaLearning: bei lokalen Dateien (use_custom_io)
+                     * spiegelt der gemessene Delta nur die VBV-Vorbefuellung
+                     * des Muxers wider, nicht einen echten Versatz - siehe
+                     * Aufrufstellen. */
+                    if (!suppressDeltaLearning)
+                    {
+                        feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+                    }
                 }
             }
             return corrected;
@@ -1171,7 +1179,10 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
         {
             int64_t currentDelta = isAudio ? (corrected - otherTrackLastGoodPts)
                                             : (otherTrackLastGoodPts - corrected);
-            feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+            if (!suppressDeltaLearning)
+            {
+                feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+            }
         }
     }
     return corrected;
@@ -2073,7 +2084,8 @@ static void FFMPEGThread(Context_t *context)
                             totalPacketCounter, &packetCounterAtLastGoodVideoPts,
                             &lastGoodVideoPtsWallClock,
                             &lastGoodVideoPtsTrusted,
-                            &sessionBasePts);
+                            &sessionBasePts,
+                            use_custom_io[cAVIdx] != 0);
                     videoTrack->dts = dts = lookupCachedPtsOffset(
                             videoPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
                             calcPts(pktStream, packet.dts));
@@ -2163,7 +2175,12 @@ static void FFMPEGThread(Context_t *context)
                         totalPacketCounter, &packetCounterAtLastGoodAudioPts,
                         &lastGoodAudioPtsWallClock,
                         &lastGoodAudioPtsTrusted,
-                        &sessionBasePts);
+                        &sessionBasePts,
+                        /* Bei inject_as_pcm liefert der Decoder unten gleich
+                         * nochmal einen PTS fuer dasselbe Paket - hier also nur
+                         * cachen/dts-Lookup versorgen, das eigentliche Lernen
+                         * erst mit dem dekodierten Wert. */
+                        (use_custom_io[cAVIdx] != 0) || (audioTrack->inject_as_pcm == 1));
                 dts = lookupCachedPtsOffset(
                         audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
                         calcPts(pktStream, packet.dts));
@@ -2258,9 +2275,17 @@ static void FFMPEGThread(Context_t *context)
                 {
                     AVCodecContext *c = audioTrack->avCodecCtx;
 
+                    /* restart_audio_resampling wird bewusst NICHT hier schon auf 0
+                     * zurueckgesetzt: landet ein Sprung mitten in einem DTS-HD-Asset,
+                     * kann das erste gelesene Paket mit AVERROR_INVALIDDATA
+                     * fehlschlagen (siehe unten), ohne dass ein Frame erzeugt wurde.
+                     * Wuerde das Flag hier schon geloescht, wuerde das naechste,
+                     * eigentlich intakte Paket faelschlich mit bResampling=0 an
+                     * pcm.c ausgeliefert und der alte Vor-Sprung-Zeitstempel bliebe
+                     * aktiv. Zurueckgesetzt wird es erst weiter unten, nachdem ein
+                     * Frame tatsaechlich erfolgreich geschrieben wurde. */
                     if (restart_audio_resampling)
                     {
-                        restart_audio_resampling = 0;
                         if (swr)
                         {
                             swr_free(&swr);
@@ -2485,7 +2510,8 @@ static void FFMPEGThread(Context_t *context)
                                 totalPacketCounter, &packetCounterAtLastGoodAudioPts,
                                 &lastGoodAudioPtsWallClock,
                                 &lastGoodAudioPtsTrusted,
-                                &sessionBasePts);
+                                &sessionBasePts,
+                                use_custom_io[cAVIdx] != 0);
                         out_samples = swr_convert(swr, &output[0], out_samples, (const uint8_t **) &decoded_frame->data[0], in_samples);
                         
                         //////////////////////////////////////////////////////////////////////
@@ -2497,6 +2523,11 @@ static void FFMPEGThread(Context_t *context)
 #endif
                         pcmExtradata.bits_per_coded_sample = 16;
                         pcmExtradata.sample_rate           = out_sample_rate;
+                        /* In diesem Softwaredecode-Zweig wurde bResampling bisher nie
+                         * gesetzt (nur der Raw-PCM-Passthrough-Zweig oben tut das) -
+                         * pcm.c sah dadurch einen undefinierten Stack-Wert statt des
+                         * tatsaechlichen restart_audio_resampling-Zustands. */
+                        pcmExtradata.bResampling           = restart_audio_resampling;
                         // The data described by the sample format is always in native-endian order
 #ifdef WORDS_BIGENDIAN
                         pcmExtradata.codec_id       = AV_CODEC_ID_PCM_S16BE;
@@ -2521,6 +2552,13 @@ static void FFMPEGThread(Context_t *context)
                         if (!context->playback->BackWard && Write(context->output->audio->Write, context, &avOut, pts) < 0)
                         {
                             ffmpeg_err("writing data to audio device failed\n");
+                        }
+                        else
+                        {
+                            /* Erst jetzt, nach einem tatsaechlich erfolgreich
+                             * geschriebenen Frame, das Reinit-Flag loeschen (siehe
+                             * Kommentar oben am Schleifenanfang). */
+                            restart_audio_resampling = 0;
                         }
                         pcm_audio_export_write((const uint8_t *) output[0], (uint32_t) avOut.len,
                                                (uint32_t) pcmExtradata.sample_rate, (uint16_t) pcmExtradata.channels);
@@ -2783,6 +2821,13 @@ int SAM_ReadFunc(void *ptr, uint8_t *buffer, int lSize)
     if (!io->pMoovFile)
     {
         ret = (int)fread( (void *) buffer, (size_t) 1, (size_t) lSize, io->pFile );
+        if (ret == 0)
+        {
+            if (feof(io->pFile))
+                return AVERROR_EOF;
+            if (ferror(io->pFile))
+                return AVERROR(errno ? errno : EIO);
+        }
     }
     else
     {
@@ -2792,7 +2837,7 @@ int SAM_ReadFunc(void *ptr, uint8_t *buffer, int lSize)
             buffer += ret;
             lSize -= ret;
         }
-        
+
         if (io->iOffset + ret >= io->iMoovAtomOffset)
         {
             if (ret)
@@ -2804,11 +2849,15 @@ int SAM_ReadFunc(void *ptr, uint8_t *buffer, int lSize)
                     lSize = 0;
                 }
             }
-            
+
             ret += (int)fread( (void *) buffer, (size_t) 1, (size_t) lSize, io->pMoovFile );
         }
-        
+
         io->iOffset += ret;
+        if (ret == 0)
+        {
+            return AVERROR_EOF;
+        }
     }
     return ret;
 }
@@ -2820,7 +2869,24 @@ int64_t SAM_SeekFunc(void *ptr, int64_t pos, int whence)
     int64_t ret = -1;
     if (!io->pMoovFile)
     {
-        if( AVSEEK_SIZE != whence )
+        if( AVSEEK_SIZE == whence )
+        {
+            /* Kein fstat()/struct stat hier: auf VTi15 (glibc 2.30, ARM) liefert
+             * der time64-fstat-Wrapper (glibc_compat.c) st_size zuverlaessig 0
+             * (Kernel-struct-stat64-Layout vs. Host-Compiler-Erwartung passen
+             * nicht zusammen), FFmpeg haelt die Datei dann fuer laengenlos und
+             * "Springen" bricht die Wiedergabe ab (PLAYBACK_LENGTH:0). fseeko/
+             * ftello werden im else-Zweig bereits unten fuer alle anderen Seeks
+             * verwendet und funktionieren nachweislich korrekt auf allen
+             * Plattformen - hier nur zusaetzlich ans Dateiende und zurueck. */
+            off_t curr = ftello(io->pFile);
+            if (fseeko(io->pFile, 0, SEEK_END) == 0)
+            {
+                ret = (int64_t)ftello(io->pFile);
+                fseeko(io->pFile, curr, SEEK_SET);
+            }
+        }
+        else
         {
             ret = (int64_t)fseeko(io->pFile, (off_t)pos, whence);
             if(0 == ret)
@@ -2932,7 +2998,7 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
     {
         AVIOContext *avio_ctx = NULL;
         custom_io_tab[AVIdx] = malloc(sizeof(CustomIOCtx_t));
-        sizeof(custom_io_tab[AVIdx], 0x00, sizeof(CustomIOCtx_t));
+        memset(custom_io_tab[AVIdx], 0x00, sizeof(CustomIOCtx_t));
         
         custom_io_tab[AVIdx]->szFile = filename;
         custom_io_tab[AVIdx]->iFileSize = fileSize;
@@ -4442,6 +4508,16 @@ static int32_t container_ffmpeg_stop(Context_t *context)
                 av_freep(&(avContextTab[i]->pb->buffer));
                 av_freep(&(avContextTab[i]->pb));
                 use_custom_io[i] = 0;
+
+                if (NULL != custom_io_tab[i])
+                {
+                    if (NULL != custom_io_tab[i]->pFile)
+                        fclose(custom_io_tab[i]->pFile);
+                    if (NULL != custom_io_tab[i]->pMoovFile)
+                        fclose(custom_io_tab[i]->pMoovFile);
+                    free(custom_io_tab[i]);
+                    custom_io_tab[i] = NULL;
+                }
             }
             avformat_close_input(&avContextTab[i]);
             avContextTab[i] = NULL;

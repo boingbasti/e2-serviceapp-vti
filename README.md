@@ -30,6 +30,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Tonspurwechsel bei Live-DASH-Streams mit mehreren Tonspuren ohne Bild-/Ton-Versatz, gleichnamige Spuren werden durchnummeriert
 - Deutlich schnelleres Spulen in bestimmten, über HTTP abgespielten Streams/Dateien ohne Index (lineare Byte-Schätzung statt FFmpegs binärer Suche)
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
+- Direkte Wiedergabe von `.m2ts`/`.mts`-Dateien (z. B. komplette Blu-Ray-Rips) über exteplayer3, da der native Hardware-Decoder bestimmte DTS-HD-HRA-Tonspuren nicht decodieren kann
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
 

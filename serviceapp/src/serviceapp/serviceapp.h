@@ -251,7 +251,8 @@ class eServiceFactoryApp: public iServiceHandler
 public:
 	eServiceFactoryApp();
 	virtual ~eServiceFactoryApp();
-	enum { 
+	enum {
+		idServiceM2TS = 3,
 		idServiceMP3 = 4097,
 		idServiceGstPlayer = 5001,
 		idServiceExtEplayer3 = 5002

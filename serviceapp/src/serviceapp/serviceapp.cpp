@@ -9,6 +9,7 @@
 #include <sstream>
 #include <algorithm>
 #include <unistd.h>
+#include <strings.h>
 #include <endian.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
@@ -141,16 +142,47 @@ static eServiceAppOptions g_ServiceAppOptionsUser;
 static const std::string gReplaceServiceMP3Path = eEnv::resolve("$sysconfdir/enigma2/serviceapp_replaceservicemp3");
 static const bool gReplaceServiceMP3 = ( access( gReplaceServiceMP3Path.c_str(), F_OK ) != -1 );
 
+static bool isM2TSService(const eServiceReference& ref)
+{
+	if (ref.type == eServiceFactoryApp::idServiceM2TS)
+		return true;
+
+	std::string p = ref.path;
+	size_t sep = p.find_first_of("|?#");
+	if (sep != std::string::npos)
+		p = p.substr(0, sep);
+
+	size_t dot = p.find_last_of('.');
+	if (dot != std::string::npos)
+	{
+		std::string ext = p.substr(dot);
+		if (strcasecmp(ext.c_str(), ".m2ts") == 0 || strcasecmp(ext.c_str(), ".mts") == 0)
+			return true;
+	}
+	return false;
+}
+
 static BasePlayer *createPlayer(const eServiceReference& ref)
 {
 	BasePlayer *player = NULL;
-	if (ref.type == eServiceFactoryApp::idServiceExtEplayer3 || (ref.type == eServiceFactoryApp::idServiceMP3 && g_playerServiceMP3 == EXTEPLAYER3) )
+	const bool isM2TS = isM2TSService(ref);
+
+	if (ref.type == eServiceFactoryApp::idServiceExtEplayer3 || isM2TS || (ref.type == eServiceFactoryApp::idServiceMP3 && g_playerServiceMP3 == EXTEPLAYER3) )
 	{
 		ExtEplayer3Options *options = NULL;
+		ExtEplayer3Options localOptions;
+
 		if (g_useUserSettings)
 			options = &g_ExtEplayer3OptionsUser;
-		else if (ref.type == eServiceFactoryApp::idServiceExtEplayer3)
-			options = &g_ExtEplayer3OptionsServiceExt3;
+		else if (ref.type == eServiceFactoryApp::idServiceExtEplayer3 || isM2TS)
+		{
+			localOptions = g_ExtEplayer3OptionsServiceExt3;
+			if (isM2TS && (g_ExtEplayer3OptionsServiceMP3.downmix || g_ExtEplayer3OptionsServiceExt3.downmix))
+			{
+				localOptions.downmix = true;
+			}
+			options = &localOptions;
+		}
 		else
 			options = &g_ExtEplayer3OptionsServiceMP3;
 		player = new ExtEplayer3(*options);
@@ -171,20 +203,27 @@ static BasePlayer *createPlayer(const eServiceReference& ref)
 
 static eServiceAppOptions *createOptions(const eServiceReference& ref)
 {
+	const bool isM2TS = isM2TSService(ref);
 	eServiceAppOptions *options = NULL;
-	switch(ref.type)
+
+	if (isM2TS || ref.type == eServiceFactoryApp::idServiceExtEplayer3)
 	{
-		case eServiceFactoryApp::idServiceMP3:
-			options = &g_ServiceAppOptionsServiceMP3;
-			break;
-                case eServiceFactoryApp::idServiceExtEplayer3:
-			options = &g_ServiceAppOptionsServiceExt3;
-			break;
-                case eServiceFactoryApp::idServiceGstPlayer:
-			options = &g_ServiceAppOptionsServiceGst;
-			break;
-		default:
-			break;
+		options = &g_ServiceAppOptionsServiceExt3;
+	}
+	else
+	{
+		switch(ref.type)
+		{
+			case eServiceFactoryApp::idServiceMP3:
+				options = &g_ServiceAppOptionsServiceMP3;
+				break;
+			case eServiceFactoryApp::idServiceGstPlayer:
+				options = &g_ServiceAppOptionsServiceGst;
+				break;
+			default:
+				options = &g_ServiceAppOptionsServiceMP3;
+				break;
+		}
 	}
 	if(g_useUserSettings)
 	{
@@ -1902,6 +1941,12 @@ eServiceFactoryApp::eServiceFactoryApp()
 		{
 			sc->removeServiceFactory(eServiceFactoryApp::idServiceMP3);
 			sc->addServiceFactory(eServiceFactoryApp::idServiceMP3, this, extensions);
+
+			sc->removeServiceFactory(eServiceFactoryApp::idServiceM2TS);
+			std::list<std::string> m2ts_extensions;
+			m2ts_extensions.push_back("m2ts");
+			m2ts_extensions.push_back("mts");
+			sc->addServiceFactory(eServiceFactoryApp::idServiceM2TS, this, m2ts_extensions);
 		}
 		extensions.clear();
 		sc->addServiceFactory(eServiceFactoryApp::idServiceGstPlayer, this, extensions);
@@ -1921,6 +1966,7 @@ eServiceFactoryApp::~eServiceFactoryApp()
 		if (gReplaceServiceMP3)
 		{
 			sc->removeServiceFactory(eServiceFactoryApp::idServiceMP3);
+			sc->removeServiceFactory(eServiceFactoryApp::idServiceM2TS);
 		}
 		sc->removeServiceFactory(eServiceFactoryApp::idServiceGstPlayer);
 		sc->removeServiceFactory(eServiceFactoryApp::idServiceExtEplayer3);

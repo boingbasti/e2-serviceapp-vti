@@ -568,11 +568,43 @@ int LinuxDvbClear(Context_t  *context __attribute__((unused)), char *type)
                 ret = cERR_LINUXDVB_ERROR;
             }
         }
-        else if (audio && audiofd != -1) 
+        else if (audio && audiofd != -1)
         {
             if (ioctl(audiofd, AUDIO_CLEAR_BUFFER) == -1)
             {
                 linuxdvb_err("AUDIO_CLEAR_BUFFER: ERROR %d, %s\n", errno, strerror(errno));
+                ret = cERR_LINUXDVB_ERROR;
+            }
+            char *Encoding = NULL;
+            if (context && context->manager && context->manager->audio)
+            {
+                context->manager->audio->Command(context, MANAGER_GETENCODING, &Encoding);
+                Writer_t *writer = getWriter(Encoding);
+                if (writer && writer->caps && writer->caps->dvbStreamType == AUDIOTYPE_RAW)
+                {
+                    /* Bei Software-PCM (AUDIOTYPE_RAW / Bypass 48) ignoriert der
+                     * Broadcom-Treiber AUDIO_CLEAR_BUFFER und AUDIO_CONTINUE weitgehend,
+                     * weil kein Hardware-Decoder existiert. Die DMA-Playpump und der
+                     * interne PES-Header-Zustand muessen ueber AUDIO_SET_BYPASS_MODE und
+                     * AUDIO_PLAY neu scharfgeschaltet werden, genau wie bei LinuxDvbSwitch,
+                     * damit der neue Zeitstempel nach dem Sprung uebernommen und die
+                     * Tonausgabe fortgesetzt wird. */
+                    int bypass = LinuxDvbMapBypassMode(writer->caps->dvbStreamType, true);
+                    if (ioctl(audiofd, AUDIO_SET_BYPASS_MODE, bypass) < 0)
+                    {
+                        ioctl(audiofd, AUDIO_SET_BYPASS_MODE, LinuxDvbMapBypassMode(writer->caps->dvbStreamType, false));
+                    }
+                    if (ioctl(audiofd, AUDIO_PLAY) == -1)
+                    {
+                        linuxdvb_err("AUDIO_PLAY: ERROR %d, %s\n", errno, strerror(errno));
+                        ret = cERR_LINUXDVB_ERROR;
+                    }
+                }
+                free(Encoding);
+            }
+            if (ioctl(audiofd, AUDIO_CONTINUE) == -1)
+            {
+                linuxdvb_err("AUDIO_CONTINUE: ERROR %d, %s\n", errno, strerror(errno));
                 ret = cERR_LINUXDVB_ERROR;
             }
         }

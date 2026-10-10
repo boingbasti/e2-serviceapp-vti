@@ -13,8 +13,12 @@
 #define GLIBC_COMPAT_VER_RWLOCK "2.4"
 #include "glibc_compat_pthread_time64.h"
 
-/* lstat64 direkt - eigenes #include <sys/stat.h>, siehe Header-Kommentar */
+/* lstat64/fstat64 direkt - eigenes #include <sys/stat.h>, siehe Header-Kommentar */
 #include <sys/stat.h>
 int __lstat64_time64(const char *pathname, struct stat *statbuf) {
     return (int)syscall(SYS_lstat64, pathname, statbuf);
+}
+
+int __fstat64_time64(int fd, struct stat *statbuf) {
+    return (int)syscall(SYS_fstat64, fd, statbuf);
 }

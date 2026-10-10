@@ -109,8 +109,7 @@
          return seq_no;
      }
 
--    if (!pls->finished) {
-+    if (!pls->finished && pls->type != PLS_TYPE_EVENT) {
+     if (!pls->finished) {
          if (!c->first_packet && /* we are doing a segment selection during playback */
              c->cur_seq_no >= pls->start_seq_no &&
              c->cur_seq_no < pls->start_seq_no + pls->n_segments)

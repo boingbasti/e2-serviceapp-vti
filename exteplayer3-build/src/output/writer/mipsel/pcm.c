@@ -82,6 +82,8 @@ static uint32_t fixed_bufferfilled;
 static int32_t reset()
 {
     initialHeader = 1;
+    fixed_bufferfilled = 0;
+    fixed_buffertimestamp = 0;
     return 0;
 }
 
@@ -116,7 +118,16 @@ static int32_t writeData(void *_call)
     uint8_t *buffer = call->data;
     uint32_t   size = call->len;
     
-    if( pcmPrivateData->bResampling || NULL == fixed_buffer )
+    /* Nach einem Sprung/Resampler-Reset (bResampling) oder beim allerersten
+     * Schreibvorgang muss der Vor-Sprung-Zeitstempel verworfen werden - sonst
+     * zaehlt fixed_buffertimestamp unten stur in kleinen Schritten weiter,
+     * waehrend das Video schon beim neuen Sprungziel ist. Zusaetzliche
+     * Absicherung: ein Zeitstempel-Sprung von mehr als 500ms gegenueber dem
+     * zuletzt geschriebenen Wert erzwingt ebenfalls eine Neuinitialisierung,
+     * falls bResampling aus irgendeinem Grund nicht gesetzt wurde. */
+    uint8_t ptsJumped = fixed_buffertimestamp > 0 &&
+        llabs((int64_t)call->Pts - (int64_t)fixed_buffertimestamp) > 45000;
+    if( pcmPrivateData->bResampling || NULL == fixed_buffer || initialHeader || ptsJumped )
     {
         int32_t width = 0;
         int32_t depth = 0;
@@ -204,6 +215,7 @@ static int32_t writeData(void *_call)
             fixed_buffer = malloc(fixed_buffersize);
         }
         fixed_bufferfilled = 0;
+        initialHeader = 0;
         pcm_printf(40, "PCM fixed_buffersize [%u] [%s]\n", fixed_buffersize, LE ? "LE":"BE");
     }
     

@@ -386,13 +386,14 @@ class ServiceAppSettings(ConfigListScreen, Screen):
     def build_configlist(self):
         config_list = [getConfigListEntry(_("Enigma2 playback system"),
             config_serviceapp.servicemp3.replace, _("Select the player which will be used for Enigma2 playback."))]
+        if config_serviceapp.servicemp3.replace.value:
+            config_list.append(getConfigListEntry(_("Player"),
+                config_serviceapp.servicemp3.player, _("Select the player which will be used in serviceapp for Enigma2 playback.")))
         config_list.append(getConfigListEntry(_("Debug logging"),
             config_serviceapp.debug_logging, _("Enable verbose diagnostic logging to /tmp/serviceapp.log (a RAM disk on this box). Leave off for normal use, only enable it temporarily when troubleshooting a playback issue.")))
         config_list.append(getConfigListEntry(_("Automated Picon Sync for 5001/5002"),
             config_serviceapp.picon_sync, _("Automatically create symlinks for 5001/5002 channels to standard DVB (1) picons.")))
         if config_serviceapp.servicemp3.replace.value:
-            config_list.append(getConfigListEntry(_("Player"), 
-                config_serviceapp.servicemp3.player, _("Select the player which will be used in serviceapp for Enigma2 playback.")))
             configlist_servicemp3 = [getConfigListEntry("", ConfigNothing())]
             configlist_servicemp3.append(getConfigListEntry(_("ServiceMp3 (%s)" % str(serviceapp_client.ID_SERVICEMP3)), ConfigNothing()))
             if config_serviceapp.servicemp3.player.value == "gstplayer":
