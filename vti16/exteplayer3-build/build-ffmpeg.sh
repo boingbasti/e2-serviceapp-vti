@@ -88,6 +88,7 @@ export PKG_CONFIG_PATH=""
   --disable-armv5te \
   --enable-zlib \
   --enable-libxml2 \
+  --enable-libdav1d \
   --disable-doc \
   --disable-debug \
   --disable-htmlpages \

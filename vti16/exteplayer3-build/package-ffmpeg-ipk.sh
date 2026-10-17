@@ -48,7 +48,7 @@ License: GPL-2.0
 Architecture: ${ARCH_TAG}
 OE: ffmpeg
 Homepage: https://www.ffmpeg.org/
-Depends: libc6 (>= 2.40), exteplayer3 (= 1:183+vti001), libxml2
+Depends: libc6 (>= 2.40), exteplayer3 (= 1:183+vti001), libxml2, dav1d (>= 1.4.3)
 Source: https://ffmpeg.org/releases/ffmpeg-7.0.2.tar.xz
 EOF
 

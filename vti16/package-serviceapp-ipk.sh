@@ -49,10 +49,10 @@ cp "${PYDIR}/serviceapp_caps.py"   "${PKGDIR}/data_root${INSTDIR}/"
 
 # Depends-Versionsfloors gegen die echten, auf einer VTi16-Testbox
 # installierten Versionen geprueft (opkg list-installed/opkg search), nicht geschaetzt:
-# libc6 2.40+git..., libstdc++6/libgcc1 14.2.0, libssl1.0.2/libcrypto1.0.2
-# 1.0.2u (Paketname "libssl1.0.2", NICHT "libssl1.0.0" wie auf VTi15),
-# uchardet 0.0.8. "openssl10-conf" wird von libssl1.0.2 automatisch
-# nachgezogen, kein eigener Depends noetig.
+# libc6 2.40+git..., libstdc++6/libgcc1 14.2.0, libssl3/libcrypto3 3.3.1
+# (Paketname "libssl3"/"libcrypto3", NICHT mehr die alten 1.0.2-Kompat-Pakete,
+# seit Umstellung auf TLS 1.3 + libdav1d), uchardet 0.0.8. "openssl-conf"
+# wird von libssl3 automatisch nachgezogen, kein eigener Depends noetig.
 cat > "${PKGDIR}/ctrl_root/control" << EOF
 Package: enigma2-plugin-systemplugins-serviceapp
 Version: ${VERSION}
@@ -63,7 +63,7 @@ Maintainer: saufsoldat
 License: GPL-2.0
 Homepage: https://github.com/boingbasti/e2-serviceapp-vti
 Architecture: ${ARCH_TAG}
-Depends: gstplayer, libgcc1 (>= 14.2.0), libssl1.0.2 (>= 1.0.2u), libstdc++6 (>= 14.2.0), enigma2, openssl, libcrypto1.0.2 (>= 1.0.2u), exteplayer3, libc6 (>= 2.40), uchardet (>= 0.0.8)
+Depends: gstplayer, libgcc1 (>= 14.2.0), libssl3 (>= 3.3.1), libstdc++6 (>= 14.2.0), enigma2, openssl, libcrypto3 (>= 3.3.1), exteplayer3, libc6 (>= 2.40), uchardet (>= 0.0.8)
 Recommends: exteplayer3 (>= 1:183+vti001)
 Source: git://github.com/mx3L/serviceapp.git;branch=master;protocol=https
 EOF
