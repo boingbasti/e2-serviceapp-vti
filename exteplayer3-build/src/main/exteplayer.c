@@ -394,7 +394,18 @@ static int HandleTracks(Manager_t *ptrManager, const PlaybackCmd_t playbackSwitc
 							strbuffer_add( ptrManager->tracks_cache, ", " );
 						}
 
-						sprintf( tmp_str, "{\"id\":%d,\"e\":\"%s\",\"n\":\"%s\"}", TrackList[i].Id , TrackList[i].Encoding, TrackList[i].Name);
+						/* "f" (is_forced) nur fuer Untertitel sinnvoll befuellt (siehe
+						 * subtitle.c ManagerList) - bei Audio/Video bleibt das Feld in
+						 * TrackDescription_t unbenutzt/uninitialisiert, deshalb hier nicht
+						 * mit ausgeben, um keinen Garbage-Wert ins JSON zu schreiben. */
+						if ('s' == argvBuff[0])
+						{
+							sprintf( tmp_str, "{\"id\":%d,\"e\":\"%s\",\"n\":\"%s\",\"f\":%d}", TrackList[i].Id , TrackList[i].Encoding, TrackList[i].Name, TrackList[i].is_forced);
+						}
+						else
+						{
+							sprintf( tmp_str, "{\"id\":%d,\"e\":\"%s\",\"n\":\"%s\"}", TrackList[i].Id , TrackList[i].Encoding, TrackList[i].Name);
+						}
 						strbuffer_add( ptrManager->tracks_cache, tmp_str );
 
 						free(TrackList[i].Encoding);

@@ -583,8 +583,11 @@ static int32_t PlaybackSwitchSubtitle(Context_t  *context, int32_t *track)
             context->manager->subtitle->Command(context, MANAGER_GET, &curtrackid);
             context->manager->subtitle->Command(context, MANAGER_SET, track);
             context->manager->subtitle->Command(context, MANAGER_GET, &nextrackid);
-          
-            if (curtrackid != nextrackid && nextrackid > -1)
+
+            /* Auch beim Abschalten (nextrackid == -1) den Container benachrichtigen:
+             * sonst bleibt die zuletzt aktive Spur dauerhaft auf AVDISCARD_DEFAULT und
+             * wird weiter gelesen/dekodiert, obwohl sie gar nicht mehr angezeigt wird. */
+            if (curtrackid != nextrackid)
             {
                 if (context->output && context->output->subtitle)
                 {

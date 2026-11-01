@@ -190,7 +190,17 @@ for key in config_serviceapp.options.keys():
     config_serviceapp.options[key].hls_explorer         = ConfigBoolean(default=(key != "serviceexteplayer3"))
     config_serviceapp.options[key].autoselect_stream    = ConfigBoolean(default=True)
     config_serviceapp.options[key].connection_speed_kb  = ConfigInteger(9999999, limits=(0, 9999999))
-    config_serviceapp.options[key].autoturnon_subtitles = ConfigBoolean(False)
+    # Frueher ConfigBoolean (nur An/Aus) - jetzt 3 Stufen, um gezielt nur
+    # "Forced"-Untertitelspuren (z.B. VLCs "German (Forced)") automatisch
+    # einzuschalten, statt blind die erste gefundene Spur. Default bleibt
+    # bewusst "0" (Off), wie bisher bei ConfigBoolean(False).
+    config_serviceapp.options[key].autoturnon_subtitles = ConfigSelection(
+        choices=[
+            ("0", _("Off")),
+            ("1", _("Forced only")),
+            ("2", _("All")),
+        ],
+        default="0")
     config_serviceapp.options[key].hls_audio_filter     = ConfigBoolean(default=True)
 
 config_serviceapp.gstplayer                             = ConfigSubDict()
@@ -228,6 +238,22 @@ def key_to_setting_id(key):
     return setting_id
 
 
+def subtitle_config_key(key):
+    """Menuefalle: "ServiceMp3 (4097)" hatte bisher eine eigene, unabhaengige
+    Kopie von "Auto turn on subtitles", getrennt von "ServiceExtEplayer3
+    (5002)" - obwohl lokale HDD-Dateien (Typ 4097) bei aktivem
+    servicemp3.player=exteplayer3 intern ueber genau dieses Backend laufen.
+    Stellt man die Option nur unter 5002 ein, blieb sie unter 4097 unbemerkt
+    auf "Off" stehen. Diese Funktion loest fuer "servicemp3" gezielt auf das
+    Backend auf, das tatsaechlich die Wiedergabe uebernimmt, nur fuer
+    autoturnon_subtitles - die uebrigen Felder (HLS Explorer, HLS-Qualitaet,
+    ...) behalten bewusst unterschiedliche Defaults zwischen 4097 und 5002
+    und werden hier nicht angefasst. """
+    if key == "servicemp3":
+        return "service" + config_serviceapp.servicemp3.player.value
+    return key
+
+
 def init_serviceapp_settings():
     debug_logging = config_serviceapp.debug_logging.value
 
@@ -235,7 +261,7 @@ def init_serviceapp_settings():
         setting_id           = key_to_setting_id(key)
         serviceapp_cfg       = config_serviceapp.options[key]
 
-        autoturnon_subtitles = serviceapp_cfg.autoturnon_subtitles.value
+        autoturnon_subtitles = int(config_serviceapp.options[subtitle_config_key(key)].autoturnon_subtitles.value)
         hls_explorer         = serviceapp_cfg.hls_explorer.value
         autoselect_stream    = serviceapp_cfg.autoselect_stream.value
         connection_speed_kb  = serviceapp_cfg.connection_speed_kb.value
@@ -350,10 +376,10 @@ class ServiceAppSettings(ConfigListScreen, Screen):
             exteplayer3_options_cfg.pcm_audio_export, _("Writes decoded PCM audio to /tmp/exteplayer3_pcm_audio.fifo. Forces software decoding for common audio formats.")))
         return config_list
 
-    def serviceapp_options(self, serviceapp_options_cfg):
+    def serviceapp_options(self, serviceapp_options_cfg, subtitle_cfg=None):
         config_list = []
         config_list.append(getConfigListEntry("  " + _("Auto turn on subtitles"),
-            serviceapp_options_cfg.autoturnon_subtitles, _("Automatically turn on subtitles if available.")))
+            subtitle_cfg if subtitle_cfg is not None else serviceapp_options_cfg.autoturnon_subtitles, _("Off: never automatically. Forced only: only an embedded 'Forced' track (e.g. VLC's 'German (Forced)'), shown just for foreign-language passages. All: the first available track, regardless of type.")))
         config_list.append(getConfigListEntry("  " + _("HLS Explorer"),
             serviceapp_options_cfg.hls_explorer, _("Turn on explorer to retrieve different quality streams from HLS variant playlist and select them via subservices.")))
         config_list.append(getConfigListEntry("  " + _("HLS audio track filter"),
@@ -368,18 +394,19 @@ class ServiceAppSettings(ConfigListScreen, Screen):
         config_list = []
         player_cfg = getattr(config_serviceapp, player_type)[service_type]
         serviceapp_cfg = config_serviceapp.options[service_type]
+        subtitle_cfg = config_serviceapp.options[subtitle_config_key(service_type)].autoturnon_subtitles
         if player_type == "exteplayer3":
             config_list.append(getConfigListEntry("  " + _("ExtEplayer3"),
                 ConfigSelection([EXTEPLAYER3_VERSION or "not installed"], EXTEPLAYER3_VERSION or "not installed")))
             if EXTEPLAYER3_VERSION:
                 config_list += self.exteplayer3_options(player_cfg)
-                config_list += self.serviceapp_options(serviceapp_cfg)
+                config_list += self.serviceapp_options(serviceapp_cfg, subtitle_cfg)
         if player_type == "gstplayer":
-            config_list.append(getConfigListEntry("  " + _("GstPlayer"), 
+            config_list.append(getConfigListEntry("  " + _("GstPlayer"),
                 ConfigSelection([GSTPLAYER_VERSION or "not installed"], GSTPLAYER_VERSION or "not installed")))
             if GSTPLAYER_VERSION:
                 config_list += self.gstplayer_options(player_cfg)
-                config_list += self.serviceapp_options(serviceapp_cfg)
+                config_list += self.serviceapp_options(serviceapp_cfg, subtitle_cfg)
         return config_list
 
 

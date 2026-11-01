@@ -152,6 +152,45 @@ static int LinuxDvbMapStreamType(int streamtype, bool primary)
     return streamtype;
 }
 
+/* Beim Umschalten von einem laufenden Stream auf eine HDD-Datei beendet
+ * Enigma2 den alten exteplayer3 und startet den neuen quasi gleichzeitig.
+ * Der alte Prozess haelt /dev/dvb/adapter0/video0 bzw. audio0 noch ein
+ * paar Millisekunden, open() schlaegt dann mit EBUSY fehl, exteplayer3
+ * bricht ab und Enigma2 (Navigation.py) wartet fest eingebaute 500ms und
+ * startet den kompletten Service-Start noch mal. Mit kurzem Retry hier
+ * ist das Device meist schon beim ersten Versuch frei und der sichtbare
+ * 0,5s-Neustart entfaellt. Grenze bei 250ms, falls das Device aus einem
+ * anderen Grund dauerhaft belegt ist, bricht es weiterhin mit EBUSY ab
+ * wie bisher. */
+static int LinuxDvbOpenRetryOnBusy(const char *path, int flags)
+{
+    const int RETRY_STEP_US = 10000;
+    const int RETRY_MAX_US = 250000;
+    int waited_us = 0;
+    int fd;
+
+    while (1)
+    {
+        fd = open(path, flags);
+        if (fd >= 0 || errno != EBUSY || waited_us >= RETRY_MAX_US)
+        {
+            /* Nur bei tatsaechlichem Warten geloggt (Normalfall ohne Retry
+             * bleibt stumm), damit sich reale Wartezeiten bei Bedarf mit
+             * eingeschaltetem LINUXDVB_DEBUG_LEVEL beobachten lassen. */
+            if (waited_us > 0)
+            {
+                int saved_errno = errno;
+                linuxdvb_printf(10, "EBUSY-Retry %s: fd=%d waited_us=%d weiter_busy=%d\n",
+                                 path, fd, waited_us, (fd < 0 && saved_errno == EBUSY));
+                errno = saved_errno;
+            }
+            return fd;
+        }
+        usleep(RETRY_STEP_US);
+        waited_us += RETRY_STEP_US;
+    }
+}
+
 int LinuxDvbOpen(Context_t  *context __attribute__((unused)), char *type)
 {
     uint8_t video = !strcmp("video", type);
@@ -159,9 +198,9 @@ int LinuxDvbOpen(Context_t  *context __attribute__((unused)), char *type)
 
     linuxdvb_printf(10, "v%d a%d\n", video, audio);
 
-    if (video && videofd < 0) 
+    if (video && videofd < 0)
     {
-        videofd = open(VIDEODEV, O_RDWR | O_NONBLOCK);
+        videofd = LinuxDvbOpenRetryOnBusy(VIDEODEV, O_RDWR | O_NONBLOCK);
 
         if (videofd < 0)
         {
@@ -189,7 +228,7 @@ int LinuxDvbOpen(Context_t  *context __attribute__((unused)), char *type)
     }
     if (audio && audiofd < 0) 
     {
-        audiofd = open(AUDIODEV, O_RDWR | O_NONBLOCK);
+        audiofd = LinuxDvbOpenRetryOnBusy(AUDIODEV, O_RDWR | O_NONBLOCK);
 
         if (audiofd < 0)
         {

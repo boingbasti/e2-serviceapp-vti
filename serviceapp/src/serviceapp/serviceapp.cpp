@@ -8,6 +8,7 @@
 #include "Python.h"
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <unistd.h>
 #include <strings.h>
 #include <endian.h>
@@ -1457,9 +1458,32 @@ RESULT eServiceApp::disableSubtitles()
 	return 0;
 }
 
+/* "ger"/"deu" allein reicht nicht: manche Mux-Tools schreiben nur den
+ * zweistelligen ISO-639-1-Code "de" in den Titel (z.B. "de_Forced",
+ * "de-forced"). Nur exakte Treffer bzw. "de" mit Trenner/Klammer davor
+ * und danach zaehlen, um Fehltreffer wie "Nederlands" oder "Sweden" zu
+ * vermeiden. */
+static bool matchesGermanIsoCode(const std::string &lower_name)
+{
+	const std::string needle = "de";
+	size_t pos = 0;
+	while ((pos = lower_name.find(needle, pos)) != std::string::npos)
+	{
+		bool left_ok = (pos == 0) || !isalpha((unsigned char)lower_name[pos - 1]);
+		size_t right_idx = pos + needle.size();
+		bool right_ok = (right_idx >= lower_name.size()) || !isalpha((unsigned char)lower_name[right_idx]);
+		if (left_ok && right_ok)
+		{
+			return true;
+		}
+		pos += needle.size();
+	}
+	return false;
+}
+
 RESULT eServiceApp::getCachedSubtitle(struct SubtitleTrack &track)
 {
-	if (!options->autoTurnOnSubtitles)
+	if (options->autoTurnOnSubtitles == SUBTITLE_AUTO_OFF)
 	{
 		eDebug("eServiceApp::getCachedSubtitle - auto-turning disabled in config");
 		return -1;
@@ -1470,13 +1494,48 @@ RESULT eServiceApp::getCachedSubtitle(struct SubtitleTrack &track)
 		eDebug("eServiceApp::getCachedSubtitle - no subtitles available");
 		return -1;
 	}
-	// TODO consider language setting
-	int ret = -1;
+
 	std::vector<struct SubtitleTrack> embedded_tracks;
 	std::vector<struct SubtitleTrack> external_tracks;
 	std::remove_copy_if(tracks.begin(), tracks.end(), std::back_inserter(embedded_tracks), isExternalTrack);
 	std::remove_copy_if(tracks.begin(), tracks.end(), std::back_inserter(external_tracks), isEmbeddedTrack);
 
+	if (options->autoTurnOnSubtitles == SUBTITLE_AUTO_FORCED)
+	{
+		/* Nur gezielt eine eingebettete deutsche "Forced"-Spur aktivieren
+		 * (z.B. VLCs "German (Forced)": blendet nur bei fremdsprachigen
+		 * Passagen etwas ein). Nie die volle Dialog-Untertitelspur waehlen,
+		 * sonst wuerde bei jedem Film ungewollt der komplette Dialog
+		 * eingeblendet - External-Tracks werden hier bewusst nicht
+		 * beruecksichtigt (kein verlaessliches Forced-Merkmal). */
+		for (std::vector<struct SubtitleTrack>::iterator it = embedded_tracks.begin(); it != embedded_tracks.end(); ++it)
+		{
+			ssize_t pos = getTrackPosition(*it);
+			if (pos < 0 || (size_t)pos >= m_subtitle_streams.size())
+			{
+				continue;
+			}
+			const subtitleStream &stream = m_subtitle_streams[pos];
+			if (!stream.is_forced)
+			{
+				continue;
+			}
+			std::string lang_lower(stream.language_code);
+			std::transform(lang_lower.begin(), lang_lower.end(), lang_lower.begin(), ::tolower);
+			if (lang_lower.find("ger") != std::string::npos || lang_lower.find("deu") != std::string::npos
+					|| matchesGermanIsoCode(lang_lower))
+			{
+				track = *it;
+				eDebug("eServiceApp::getCachedSubtitle - selected forced German embedded track");
+				return 0;
+			}
+		}
+		eDebug("eServiceApp::getCachedSubtitle - forced only mode, no matching forced track found");
+		return -1;
+	}
+
+	// TODO consider language setting
+	int ret = -1;
 	bool select_embedded = (options->preferEmbeddedSubtitles || external_tracks.empty()) && !embedded_tracks.empty();
 	if (!select_embedded)
 	{
@@ -2057,10 +2116,15 @@ exteplayer3_set_setting(PyObject *self, PyObject *args)
 	bool lpcmInjection;
 	int hlsQualityMode = 0;
 	bool hlsAudioDefaultOnly = false;
-	bool debugLoggingEnabled = false;
-	bool pcmAudioExportEnabled = false;
+	/* Sentinel statt bool-Default: unterscheidet "Aufrufer hat den Parameter
+	   weggelassen" von "Aufrufer hat ihn explizit auf False gesetzt". Aeltere/
+	   fremde Plugins, die diese optionalen Parameter nicht kennen, wuerden
+	   sonst bei jedem Aufruf ungewollt debugLoggingEnabled/pcmAudioExportEnabled
+	   hart auf false zuruecksetzen. */
+	char debugLoggingParam = -1;
+	char pcmAudioExportParam = -1;
 
-	if (!PyArg_ParseTuple(args, "ibbbbb|ibbb", &settingId, &aacSwDecoding, &dtsSwDecoding, &wmaSwDecoding, &lpcmInjection, &downmix, &hlsQualityMode, &hlsAudioDefaultOnly, &debugLoggingEnabled, &pcmAudioExportEnabled))
+	if (!PyArg_ParseTuple(args, "ibbbbb|ibbb", &settingId, &aacSwDecoding, &dtsSwDecoding, &wmaSwDecoding, &lpcmInjection, &downmix, &hlsQualityMode, &hlsAudioDefaultOnly, &debugLoggingParam, &pcmAudioExportParam))
 		return NULL;
 
 	ExtEplayer3Options *options = NULL;
@@ -2093,8 +2157,10 @@ exteplayer3_set_setting(PyObject *self, PyObject *args)
 		options->downmix = downmix;
 		options->hlsQualityMode = hlsQualityMode;
 		options->hlsAudioDefaultOnly = hlsAudioDefaultOnly;
-		options->debugLoggingEnabled = debugLoggingEnabled;
-		options->pcmAudioExportEnabled = pcmAudioExportEnabled;
+		if (debugLoggingParam != -1)
+			options->debugLoggingEnabled = (debugLoggingParam != 0);
+		if (pcmAudioExportParam != -1)
+			options->pcmAudioExportEnabled = (pcmAudioExportParam != 0);
 	}
 	return Py_BuildValue("b", ret);
 }
@@ -2104,23 +2170,33 @@ serviceapp_set_setting(PyObject *self, PyObject *args)
 {
 	bool ret = true;
 
-	bool autoTurnOnSubtitles;
+	/* int statt bool: 0=Off, 1=Forced only, 2=All (siehe SUBTITLE_AUTO_*
+	   in serviceapp.h). "i" statt "b" im Format-String bleibt abwaerts-
+	   kompatibel zu alten Aufrufen mit True/False (int(False)==0, int(True)==1). */
+	int autoTurnOnSubtitles;
 	int settingId;
 	bool HLSExplorer;
 	bool autoSelectStream;
 	int32_t connectionSpeedInKb;
 	bool HLSAudioFilter;
-	bool debugLoggingEnabled = false;
+	/* Sentinel statt bool-Default, siehe Kommentar in exteplayer3_set_setting():
+	   nur bei explizit mitgegebenem Parameter ueberschreiben, sonst bleibt der
+	   bestehende Zustand unangetastet (fremde Plugins ohne Kenntnis dieses
+	   Parameters duerfen das Logging nicht mehr ungewollt abschalten). */
+	char debugLoggingParam = -1;
 
-	if (!PyArg_ParseTuple(args, "ibbIbb|b", &settingId, &HLSExplorer, &autoSelectStream, &connectionSpeedInKb, &autoTurnOnSubtitles, &HLSAudioFilter, &debugLoggingEnabled))
+	if (!PyArg_ParseTuple(args, "ibbIib|b", &settingId, &HLSExplorer, &autoSelectStream, &connectionSpeedInKb, &autoTurnOnSubtitles, &HLSAudioFilter, &debugLoggingParam))
 		return NULL;
 
 	/* Process-wide, not per-options-struct: applies regardless of which settingId
 	   was pushed, takes effect immediately (no Enigma2 restart) since eDebug()/eLog()
 	   and SALOG()/M3ULOG() check these globals fresh on every call. */
-	g_debugLoggingEnabled = debugLoggingEnabled;
-	debugLvl = debugLoggingEnabled ? 4 /* lvlDebug */ : 2 /* lvlWarning */;
-	
+	if (debugLoggingParam != -1)
+	{
+		g_debugLoggingEnabled = (debugLoggingParam != 0);
+		debugLvl = g_debugLoggingEnabled ? 4 /* lvlDebug */ : 2 /* lvlWarning */;
+	}
+
 	eServiceAppOptions *options = NULL;
 	switch (settingId)
 	{
@@ -2194,7 +2270,7 @@ static PyMethodDef serviceappMethods[] = {
 	 " HLSExplorer - defines if HLS explorer will be used to retrieve streams from HLS master playlist (True, False))\n"
 	 " autoSelectStream - if there are more streams available, it defines if stream will be auto-selected according to connectionSpeedInKb (True, False)\n"
 	 " connectionSpeedInKb - defines bitrate in kilobits/s according to which will be selected stream from playlist <0, max(int32_t)>\n"
-	 " autoTurnOnSubtitles - auto turn on subtitles if available (True, False)\n"
+	 " autoTurnOnSubtitles - auto turn on subtitles if available (0=Off, 1=Forced only, 2=All; True/False bleiben als 1/0 kompatibel)\n"
 	 " debugLoggingEnabled - optional, (True, False), default False (process-wide, not per setting_id)\n"
 	},
 	 {NULL,NULL,0,NULL}

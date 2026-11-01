@@ -227,9 +227,15 @@ void ExtEplayer3::handleJsonOutput(cJSON *json)
 		{
 			cJSON *subitem=cJSON_GetArrayItem(value,i);
 			subtitleStream s;
-			s.id = cJSON_GetObjectItem(subitem, "id")->valueint; 
+			s.id = cJSON_GetObjectItem(subitem, "id")->valueint;
 			s.description = cJSON_GetObjectItem(subitem, "e")->valuestring;
 			s.language_code = cJSON_GetObjectItem(subitem, "n")->valuestring;
+			cJSON *forced = cJSON_GetObjectItem(subitem, "f");
+			s.is_forced = (forced && forced->valueint != 0);
+			if (!s.is_forced && s.language_code.find("Forced") != std::string::npos)
+			{
+				s.is_forced = true;
+			}
 			streams.push_back(s);
 		}
 		recvSubtitleTracksList(0, streams);

@@ -318,6 +318,12 @@ void hls_audio_default_only_set(const int32_t val)
 void verbose_logging_set(const int32_t val)
 {
     g_verbose_logging = val;
+    /* LINUXDVB_DEBUG_LEVEL ist ein eigener, von g_verbose_logging unabhaengiger
+     * Pegel (normalerweise nur per -L LINUXDVB_DEBUG_LEVEL:10 von Hand gesetzt).
+     * An denselben Schalter gekoppelt, damit ein Diagnose-Log in
+     * linuxdvb_mipsel.c auch ueber das normale serviceapp-Debug-Logging (-g)
+     * erreichbar ist, nicht nur per manuellem -L-Flag. */
+    LINUXDVB_DEBUG_LEVEL = val ? 10 : 0;
 }
 
 void wma_software_decoder_set(const int32_t val)
@@ -693,7 +699,7 @@ static char* Codec2Encoding(int32_t codec_id, int32_t media_type, uint8_t *extra
  * spaeteren Clip (jeder Werbespot, jeder Einspieler) fuer immer gegen diese
  * eine fremde Referenz -- ob ein Clip damit einen gueltigen oder negativen
  * (=INVALID_PTS_VALUE) Wert ergab, hing so rein davon ab, was zufaellig
- * zuerst in der Session lief, nicht vom Clip selbst (beobachtet .11
+ * zuerst in der Session lief, nicht vom Clip selbst (beobachtet
  * 2026-07-26: derselbe Werbespot lief fehlerfrei, wenn er zuerst kam, aber
  * blieb haengen, wenn ein anderer Clip vorher schon die Referenz gesetzt
  * hatte). Die Normalisierung passiert jetzt ausschliesslich ueber den
@@ -765,7 +771,7 @@ static int64_t applyPtsOffset(int64_t rawPts, int64_t offset)
  * Nutzen in diesem einen Fall. */
 #define PTS_JUMP_RELEARN_THRESHOLD (3LL * 90000LL)
 
-/* Cross-Track-Kopplung gegen dauerhaften AV-Versatz (beobachtet .11
+/* Cross-Track-Kopplung gegen dauerhaften AV-Versatz (beobachtet
  * 2026-07-26: Video wechselt auf einen neuen Pointer und lernt einen Offset
  * rein aus seiner eigenen Historie, waehrend Audio unveraendert beim alten
  * Pointer bleibt -- Ergebnis war ein dauerhafter Versatz von 5,83s). Siehe
@@ -814,7 +820,7 @@ static void updateKnownGoodAVDelta(int64_t currentDelta, bool otherTrackFreshFor
     }
     /* Gleitender Mittelwert statt direkter Uebernahme: currentDelta oszilliert
      * durch Demuxer-Interleaving kontinuierlich um +-100-115ms (direkt
-     * gemessen, .11 2026-07-26, /tmp/exteplayer3_av_delta.log) -- bleibt dabei
+     * gemessen, 2026-07-26) -- bleibt dabei
      * ueber mehrere Relearn-Ereignisse hinweg stabil in derselben Bandbreite,
      * driftet nicht weiter aus. Eine direkte Uebernahme wuerde bei jedem
      * Cross-Anchor-Ereignis zufaellig eine der beiden Oszillations-Phasen
@@ -940,7 +946,7 @@ typedef struct
      * mehrfach nur gegen sich selbst neu gelernt wurde, per Cross-Anchor an
      * die Gegenspur weitergereicht wird oder in knownGoodAVDelta einsickert
      * (siehe resolveAndCachePtsOffset/updateKnownGoodAVDelta-Aufrufe unten;
-     * Fund .11 2026-07-27: Video fror ~4,8s bei einem Mehrfach-Ad-Splice ein,
+     * Fund 2026-07-27: Video fror ~4,8s bei einem Mehrfach-Ad-Splice ein,
      * Audio lernte in dieser Zeit mehrfach hintereinander anchor=own und
      * driftete dabei auf einen um ~1,4s verschobenen Offset, der danach von
      * Video per Cross-Anchor uebernommen und von knownGoodAVDelta als neuer
@@ -958,7 +964,7 @@ typedef struct
  *
  * Zusaetzlich: manche Ad-Splices behalten denselben AVStream-Pointer bei,
  * aber der rohe Zeitstempel macht trotzdem einen riesigen Sprung (beobachtet
- * .11 2026-07-26: Sprung von PTS~33 Mio. auf ~8,58 Mrd., positiv und < 2^33,
+ * 2026-07-26: Sprung von PTS~33 Mio. auf ~8,58 Mrd., positiv und < 2^33,
  * besteht daher applyPtsOffset()'s Plausibilitaetspruefung unbemerkt). Da
  * hier kein Pointer-Wechsel als Signal existiert, wird zusaetzlich die
  * absolute Differenz zum letzten guten Wert ueberwacht: bei Ueberschreiten
@@ -1834,7 +1840,7 @@ static void FFMPEGThread(Context_t *context)
              * nicht pro Segment eindeutige) Id aendert - bleibt sie bei einem
              * Ad-Splice zufaellig gleich, zeigen Track->stream weiter auf ein
              * altes, gueltiges aber falsches AVStream-Objekt mit abweichender
-             * time_base (beobachtet .11 2026-07-26: Werbespot-zu-Werbespot-
+             * time_base (beobachtet 2026-07-26: Werbespot-zu-Werbespot-
              * Uebergaenge liefen deswegen minutenlang in einer PTS-Schleife). */
             AVStream *pktStream = avContextTab[cAVIdx]->streams[packet.stream_index];
 
@@ -3469,6 +3475,128 @@ int32_t container_ffmpeg_init(Context_t *context, PlayFiles_t *playFilesNames)
     return res;
 }
 
+/* Naechsten UTF-8 Codepoint dekodieren, *p wird hinter die gelesene
+ * Sequenz gesetzt. Ungueltige Fortsetzungsbytes liefern U+FFFD und lassen
+ * *p auf dem kaputten Byte stehen (kein Pointer-Ueberlauf, Aufrufer bricht
+ * dann ueber den naechsten is_renderable-Check sauber ab). */
+static uint32_t utf8_next_codepoint(const unsigned char **p)
+{
+    unsigned char c = **p;
+    if (c == 0)
+    {
+        return 0;
+    }
+    (*p)++;
+    if (c < 0x80)
+    {
+        return c;
+    }
+    else if ((c & 0xE0) == 0xC0)
+    {
+        unsigned char c2 = **p;
+        if ((c2 & 0xC0) != 0x80) return 0xFFFD;
+        (*p)++;
+        return ((uint32_t)(c & 0x1F) << 6) | (c2 & 0x3F);
+    }
+    else if ((c & 0xF0) == 0xE0)
+    {
+        unsigned char c2 = **p; if ((c2 & 0xC0) != 0x80) return 0xFFFD;
+        unsigned char c3 = *(*p + 1); if ((c3 & 0xC0) != 0x80) return 0xFFFD;
+        *p += 2;
+        return ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(c2 & 0x3F) << 6) | (c3 & 0x3F);
+    }
+    else if ((c & 0xF8) == 0xF0)
+    {
+        unsigned char c2 = **p; if ((c2 & 0xC0) != 0x80) return 0xFFFD;
+        unsigned char c3 = *(*p + 1); if ((c3 & 0xC0) != 0x80) return 0xFFFD;
+        unsigned char c4 = *(*p + 2); if ((c4 & 0xC0) != 0x80) return 0xFFFD;
+        *p += 3;
+        return ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(c2 & 0x3F) << 12) | ((uint32_t)(c3 & 0x3F) << 6) | (c4 & 0x3F);
+    }
+    return 0xFFFD;
+}
+
+/* Prueft, ob alle Codepoints eines title-Tags im Skin-Font darstellbar
+ * sind, statt jeden title-Tag blind zu uebernehmen. Live an echten
+ * Font-Dateien per fontTools vermessen (nicht nur die cmap-Tabelle,
+ * sondern ob die gemappten Glyphen echte Konturen haben): Latein (inkl.
+ * Erweitert A/B), Griechisch und Kyrillisch (Basisblock, NICHT Cyrillic
+ * Supplement - 0% abgedeckt) sind durchgehend vorhanden. Devanagari/
+ * Tamil/Telugu/Thai/CJK/Hangul sind zu 0% abgedeckt und bleiben deshalb
+ * aussen vor - fuer solche Titel wird auf den ISO-Sprachcode
+ * zurueckgefallen, den Enigma2 selbst lesbar uebersetzt (z.B. "Chinese",
+ * "Thai"). Bewusst NICHT der volle 0x0370-0x05FF-Bereich wie in einem
+ * ersten Entwurf: das haette auch Armenisch (0x0530-058F, 0% abgedeckt)
+ * und Cyrillic Supplement (0x0500-052F, ebenfalls 0%) als "darstellbar"
+ * durchgelassen.
+ *
+ * Hebraeisch (0x0590-05FF) ist NICHT in der Allowlist: Enigma2s eigene
+ * font_arabic.cpp shaped nur arabische Buchstaben vor fribidi_log2vis
+ * (lib/gdi/font.cpp), fuer Hebraeisch fehlt das - live reproduziert, dass
+ * eine hebraeische Spur im Untertitel-Auswahlmenue trotz vorhandener
+ * Glyphen leer/auf Breite 0 geclippt bleibt. Das ist ein
+ * Enigma2-Core-Problem, unabhaengig vom Skin.
+ *
+ * Arabisch (0x0600-06FF + Presentation Forms 0xFB50-FDFF/0xFE70-FEFF) war
+ * in einer frueheren Fassung noch mit drin (ein verbreiteter Standard-Font
+ * hatte dort vollstaendige Abdeckung, Enigma2s font_arabic.cpp shaped
+ * Arabisch korrekt). Es stellte sich aber heraus, dass das SKIN-abhaengig
+ * ist: mehrere verbreitete VTi-Skins haben in ihren eigenen Fonts 0%
+ * Arabisch-Abdeckung, die Spur blieb dort als leere Zeile im Menue stehen
+ * (per fontTools gegen die echten Skin-Fonts verifiziert). Anders als bei
+ * Hebraeisch ist das also kein universeller Enigma2-Bug, sondern eine
+ * Font-Frage pro Skin - da Skins mit tatsaechlicher Arabisch-Abdeckung in
+ * der Praxis selten zu sein scheinen, ist Arabisch hier trotzdem bewusst
+ * raus und faellt auf den ISO-Code ("Arabic") zurueck, um die haeufigere
+ * leere Zeile zu vermeiden. */
+static int is_renderable_in_skin_font(const char *str)
+{
+    const unsigned char *p = (const unsigned char *)str;
+
+    if (!str || !*str)
+    {
+        return 0;
+    }
+
+    while (*p)
+    {
+        uint32_t cp = utf8_next_codepoint(&p);
+
+        if (cp <= 0x024F) continue;                     /* Basis-Latein + Latein Erweitert A/B */
+        if (cp >= 0x2000 && cp <= 0x206F) continue;      /* Allgemeine Interpunktion (Anfuehrungszeichen, Gedankenstrich, ...) */
+        if (cp >= 0x0370 && cp <= 0x03FF) continue;      /* Griechisch */
+        if (cp >= 0x0400 && cp <= 0x04FF) continue;      /* Kyrillisch (Basisblock) */
+
+        return 0;
+    }
+    return 1;
+}
+
+/* Case-insensitive Teilstring-Suche ohne strcasestr() (GNU-Erweiterung,
+ * braucht _GNU_SOURCE - in dieser Datei nicht gesetzt, andere Dateien im
+ * selben Projekt setzen es gezielt pro Datei). Nur fuer kurze title-Tags
+ * (z.B. "German (Forced)") gedacht, kein Performance-Pfad. */
+static int str_contains_case_insensitive(const char *haystack, const char *needle)
+{
+    size_t h_len = strlen(haystack);
+    size_t n_len = strlen(needle);
+    size_t i;
+
+    if (n_len == 0 || n_len > h_len)
+    {
+        return 0;
+    }
+
+    for (i = 0; i <= h_len - n_len; ++i)
+    {
+        if (!strncasecmp(haystack + i, needle, n_len))
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32_t initial)
 {
     Track_t *currAudioTrack = NULL;
@@ -4277,12 +4405,44 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
                 else if (initial && context->manager->subtitle)
                 {
                     AVDictionaryEntry *lang = NULL;
+                    AVDictionaryEntry *title = NULL;
+                    int is_forced = 0;
+                    char forced_name[64];
                     memset(&track, 0, sizeof(track));
 
                     ffmpeg_printf(10, "CODEC_TYPE_SUBTITLE %d\n", get_codecpar(stream)->codec_type);
-                    
+
                     lang = av_dict_get(stream->metadata, "language", NULL, 0);
-                    track.Name = lang ? lang->value : "und";
+                    title = av_dict_get(stream->metadata, "title", NULL, 0);
+
+                    /* "Forced" Untertitelspuren (nur Einblendung bei
+                     * fremdsprachigen Passagen, z.B. VLCs "German (Forced)")
+                     * werden von FFmpeg entweder per AV_DISPOSITION_FORCED
+                     * markiert (HLS FORCED=YES, DASH Role forced_subtitle)
+                     * oder tragen das Wort "forced" im title-Tag. Ohne diese
+                     * Auswertung bekommen zwei deutsche Spuren (volle
+                     * Untertitel + Forced) denselben Namen "ger" und sind im
+                     * Menue nicht unterscheidbar. */
+                    is_forced = (stream->disposition & AV_DISPOSITION_FORCED) ? 1 : 0;
+                    if (!is_forced && title && title->value && str_contains_case_insensitive(title->value, "forced"))
+                    {
+                        is_forced = 1;
+                    }
+
+                    if (title && title->value && title->value[0] != '\0' && is_renderable_in_skin_font(title->value))
+                    {
+                        track.Name = title->value;
+                    }
+                    else if (is_forced)
+                    {
+                        snprintf(forced_name, sizeof(forced_name), "%s (Forced)", lang ? lang->value : "und");
+                        track.Name = forced_name;
+                    }
+                    else
+                    {
+                        track.Name = lang ? lang->value : "und";
+                    }
+                    track.is_forced = is_forced;
                     ffmpeg_printf(10, "Language %s\n", track.Name);
 
                     track.Encoding       = encoding;
@@ -4805,13 +4965,16 @@ static int32_t container_ffmpeg_switch_subtitle(Context_t *context, int32_t *arg
         }
     }
 
-    /* This is made to flush inside the buffer because
-     * subtitles frame was already read and ignored
-     * we seek to force ffmpeg to read once again the same data
-     * but now we will not ignore subtitle frame
-     */
-    int64_t sec = 0;
-    context->playback->Command(context, PLAYBACK_SEEK, (void*)&sec);
+    /* Flush nur beim tatsaechlichen Einschalten einer Spur noetig (siehe Kommentar
+     * unten): subtitles frame was already read and ignored, we seek to force ffmpeg
+     * to read once again the same data but now we will not ignore subtitle frame.
+     * Beim reinen Abschalten (*arg == -1) gibt es nichts nachzuholen - der Seek
+     * wuerde nur einen unnoetigen kurzen Ruckler bei Bild/Ton verursachen. */
+    if (*arg > -1)
+    {
+        int64_t sec = 0;
+        context->playback->Command(context, PLAYBACK_SEEK, (void*)&sec);
+    }
     return cERR_CONTAINER_FFMPEG_NO_ERROR;
 }
 

@@ -32,6 +32,8 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - MIPS-Portierung inkl. eigenständiger glibc-Kompatibilitätsschicht (siehe [mips/MIPS_HEISENBUG.md](mips/MIPS_HEISENBUG.md), [mips/MIPS_VOD_TIMER_BUG.md](mips/MIPS_VOD_TIMER_BUG.md))
 - Direkte Wiedergabe von `.m2ts`/`.mts`-Dateien (z. B. komplette Blu-Ray-Rips) über exteplayer3, da der native Hardware-Decoder bestimmte DTS-HD-HRA-Tonspuren nicht decodieren kann
 - TLS 1.3 und AVIF-Dekodierung im FFmpeg-Build für VTi 16, durch Linken gegen die nativen System-Libs des Images (OpenSSL 3.3.1, libdav1d) statt gegen veraltete Kompatibilitäts-Libs
+- Forced-Untertitelspuren werden erkannt, im Menü entsprechend gekennzeichnet und können optional automatisch aktiviert werden (nur die Forced-Spur, nie der volle Dialog)
+- Aufnahme von RTSP-/RTMP-Kamerastreams (z. B. IP-Kameras) über ServiceApp, inklusive Fix für eine fälschlich gemeldete „Festplatte voll?"-Meldung
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
 

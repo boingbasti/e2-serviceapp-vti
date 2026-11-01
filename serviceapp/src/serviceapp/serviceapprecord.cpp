@@ -160,8 +160,12 @@ void eServiceAppRecord::writeMetaFile(long long length, long long filesize)
 		SALOG("eServiceAppRecord::writeMetaFile: konnte %s nicht oeffnen", metaFilename.c_str());
 		return;
 	}
-	eServiceReference metaRef = m_ref;
-	metaRef.path = "";
+	// Service-ID fuer .meta auf 0 normieren. Andernfalls sucht Enigma2s DVB-Player
+	// beim Abspielen der TS-Aufnahme nach der Bouquet-SID (z.B. 0xD6B1), waehrend
+	// FFmpegs mpegts-Muxer immer Program 1 schreibt. Bei SID 0 parst Enigma2
+	// per tstools::findPMT() die echte PMT aus dem TS-Stream und findet Video-/Audio-PIDs.
+	eServiceReference metaRef(m_ref.type, 0);
+	metaRef.setName(m_name);
 	fprintf(f, "%s\n%s\n%s\n%d\n%s\n%lld\n%lld\n%s\n%d\n%d\n",
 		metaRef.toString().c_str(), m_name.c_str(), m_descr.c_str(),
 		(int)m_time_create, m_tags.c_str(), length, filesize, "", 188, 0);
@@ -188,6 +192,22 @@ bool isPotentialDashUrl(const std::string &url)
 		[](unsigned char c) { return std::tolower(c); });
 	return lower.find(".mpd") != std::string::npos ||
 	       lower.find("/dash/") != std::string::npos;
+}
+
+// Live an einer RTSP- und einer RTMP-Kamera nachgewiesen: die -reconnect-
+// Optionen weiter unten sind HTTP(S)-spezifisch. Bei jedem anderen Protokoll
+// (RTSP, RTMP) lehnt FFmpeg sie als unbekannt ab und bricht den GESAMTEN
+// -i-Aufruf sofort mit "Option not found"/Exitcode 8 ab, noch bevor
+// ueberhaupt ein Byte aufgenommen wird - appClosed() bildet jeden
+// unerwarteten Exitcode auf errDiskFull ab (naeheres dort), daher zeigte
+// Enigma2 "Festplatte voll?", obwohl der Datentraeger damit nichts zu tun
+// hatte.
+bool urlStartsWithScheme(const std::string &url, const char *scheme)
+{
+	std::string lower = url;
+	std::transform(lower.begin(), lower.end(), lower.begin(),
+		[](unsigned char c) { return std::tolower(c); });
+	return lower.compare(0, strlen(scheme), scheme) == 0;
 }
 
 // Eigener, minimaler Ziffernparser statt strtoll(): vermeidet den
@@ -413,12 +433,32 @@ RESULT eServiceAppRecord::start(bool simulate)
 	args.push_back("-nostdin");
 	args.push_back("-loglevel");
 	args.push_back("warning");
-	args.push_back("-reconnect");
-	args.push_back("1");
-	args.push_back("-reconnect_streamed");
-	args.push_back("1");
-	args.push_back("-reconnect_delay_max");
-	args.push_back("5");
+
+	// Siehe urlStartsWithScheme()-Kommentar oben: -reconnect* ist eine reine
+	// HTTP(S)-Option, bei RTSP/RTMP/allem anderen bricht FFmpeg sonst sofort
+	// komplett ab. RTSP bekommt stattdessen -rtsp_transport tcp (UDP-SETUP
+	// scheiterte live an einer Kamera mit "461 Unsupported transport") und
+	// -timeout (Mikrosekunden-Socket-Timeout, RTSP-eigene Option, verhindert
+	// endloses Haengen bei einer stockenden Kamera-Quelle). Fuer RTMP gibt es
+	// in FFmpegs eigenem Protokoll keine aequivalente Client-Timeout-Option
+	// (nur "listen_timeout", ausschliesslich im Server-/Listen-Modus) -
+	// bekommt also bewusst keine zusaetzlichen Flags.
+	if (urlStartsWithScheme(cleanUrl, "http://") || urlStartsWithScheme(cleanUrl, "https://"))
+	{
+		args.push_back("-reconnect");
+		args.push_back("1");
+		args.push_back("-reconnect_streamed");
+		args.push_back("1");
+		args.push_back("-reconnect_delay_max");
+		args.push_back("5");
+	}
+	else if (urlStartsWithScheme(cleanUrl, "rtsp://"))
+	{
+		args.push_back("-rtsp_transport");
+		args.push_back("tcp");
+		args.push_back("-timeout");
+		args.push_back("5000000");
+	}
 
 	// Gleiche Header-/User-Agent-Extraktion wie eServiceApp::start() fuer
 	// exteplayer3 (siehe serviceapp.cpp), nur auf ffmpegs eigene
@@ -578,6 +618,25 @@ RESULT eServiceAppRecord::stop()
 		// SIGKILL-Fallback dort noch unnoetig oft.
 		for (int i = 0; i < 250; ++i)
 		{
+			// FFmpegs eigener Interrupt-Callback (fftools/ffmpeg.c,
+			// decode_interrupt_cb) verlangt waehrend einer laufenden Aufnahme
+			// (transcode_init_done=1) ZWEI Signale, um einen blockierenden
+			// Netzwerk-Read zu unterbrechen - das erste loest nur den
+			// "regulaeren" Abschluss aus, der aber selbst auf neue Netzwerk-
+			// daten wartet. Liefert die Quelle gerade keine (Kamera im
+			// Leerlauf, Stream stockt), haengt ffmpeg trotz erstem SIGINT
+			// unbegrenzt in poll() - live an einer stockenden Kamera-Quelle
+			// nachgewiesen (ueber 2 Minuten trotz SIGTERM/SIGINT). Nach
+			// 250ms (gleiche Begruendung wie der bestehende SIGKILL-Fallback
+			// unten: fruehere, kuerzere Fenster waren bei langsamerem I/O zu
+			// knapp) ein zweites SIGINT nachschicken, falls ffmpeg bis dahin
+			// nicht von selbst beendet hat - erzwingt den sofortigen Abbruch,
+			// ohne den bestehenden 2500ms-SIGKILL-Fallback als letztes
+			// Sicherheitsnetz anzutasten.
+			if (i == 25)
+			{
+				m_console->sendCtrlC();
+			}
 			if (pid > 0)
 			{
 				char stat_path[64];
@@ -647,7 +706,11 @@ void eServiceAppRecord::appClosed(int retval)
 		filesize = (long long)st.st_size;
 
 	long long length = 0;
-	int64_t probed = ffprobe_get_duration_seconds(m_filename);
+	// Bei 0 Byte (z.B. ein vor dem ersten geschriebenen Paket abgebrochenes
+	// ffmpeg) gibt es nichts zu probieren - ffprobe auf eine leere/nicht
+	// existierende Datei anzusetzen bringt keinen Mehrwert und blockiert den
+	// Aufrufer (synchron, kein eigener Thread) unnoetig.
+	int64_t probed = (filesize > 0) ? ffprobe_get_duration_seconds(m_filename) : 0;
 	if (probed > 0)
 		// writeMetaFile() schreibt "length" roh in Zeile 6 der .meta-Datei -
 		// Enigma2s eigener Movielist-Parser (Typ 1, servicedvb.cpp) erwartet

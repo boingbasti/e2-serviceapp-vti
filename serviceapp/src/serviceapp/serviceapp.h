@@ -15,18 +15,30 @@ class Event;
 #include "extplayer.h"
 #include "m3u8.h"
 
+/* Werte fuer eServiceAppOptions::autoTurnOnSubtitles. Frueher ein reines
+ * bool (automatisch die erste gefundene Spur einschalten oder nicht) - jetzt
+ * ein int, um zusaetzlich "nur Forced-Spuren automatisch einschalten" zu
+ * unterscheiden, ohne die bestehende Python<->C++-Bruecke (PyArg_ParseTuple)
+ * inkompatibel zu machen (int(False)==0, int(True)==1 bleiben gueltig). */
+enum
+{
+	SUBTITLE_AUTO_OFF = 0,
+	SUBTITLE_AUTO_FORCED = 1,
+	SUBTITLE_AUTO_ALL = 2
+};
+
 struct eServiceAppOptions
 {
-	bool autoTurnOnSubtitles;
+	int autoTurnOnSubtitles;
 	bool preferEmbeddedSubtitles;
 	bool HLSExplorer;
 	bool autoSelectStream;
 	unsigned int connectionSpeedInKb;
 	bool HLSAudioFilter;
 	eServiceAppOptions():
-		autoTurnOnSubtitles(true),
+		autoTurnOnSubtitles(SUBTITLE_AUTO_ALL),
 		preferEmbeddedSubtitles(false),
-		HLSExplorer(true), 
+		HLSExplorer(true),
 		autoSelectStream(true),
 		connectionSpeedInKb(std::numeric_limits<unsigned int>::max()),
 		HLSAudioFilter(true)
