@@ -318,6 +318,11 @@ void hls_audio_default_only_set(const int32_t val)
 void verbose_logging_set(const int32_t val)
 {
     g_verbose_logging = val;
+    /* hls.c (Teil von libavformat.so) hat keinen Zugriff auf g_verbose_logging
+     * (andere Shared Library), daher zusaetzlich per Umgebungsvariable an das
+     * dortige, nur fuer die eigene Fehlersuche gedachte Diagnose-Logging
+     * durchreichen (siehe EXTEPLAYER3_HLS_DEBUG in hls.c). */
+    setenv("EXTEPLAYER3_HLS_DEBUG", val ? "1" : "0", 1);
     /* LINUXDVB_DEBUG_LEVEL ist ein eigener, von g_verbose_logging unabhaengiger
      * Pegel (normalerweise nur per -L LINUXDVB_DEBUG_LEVEL:10 von Hand gesetzt).
      * An denselben Schalter gekoppelt, damit ein Diagnose-Log in
@@ -771,6 +776,14 @@ static int64_t applyPtsOffset(int64_t rawPts, int64_t offset)
  * Nutzen in diesem einen Fall. */
 #define PTS_JUMP_RELEARN_THRESHOLD (3LL * 90000LL)
 
+/* Kaskaden-Schutz gegen eine Flut von Relearns auf derselben Spur in
+ * kurzer Zeit (kaputte Rohzeitstempel in einem Werbespot statt eines
+ * einzelnen echten Ad-Splice-Sprungs). Mehr als RELEARN_STORM_THRESHOLD
+ * Relearns, bei denen jeweils keine RELEARN_STORM_WINDOW_US seit dem
+ * vorherigen Relearn derselben Spur vergangen sind, gelten als Kaskade. */
+#define RELEARN_STORM_WINDOW_US (2LL * 1000000LL)
+#define RELEARN_STORM_THRESHOLD 4
+
 /* Cross-Track-Kopplung gegen dauerhaften AV-Versatz (beobachtet
  * 2026-07-26: Video wechselt auf einen neuen Pointer und lernt einen Offset
  * rein aus seiner eigenen Historie, waehrend Audio unveraendert beim alten
@@ -783,8 +796,23 @@ static int64_t applyPtsOffset(int64_t rawPts, int64_t offset)
  * sonst wuerde z.B. ein komplett stummer Werbespot die andere Spur an einen
  * minutenalten Wert zurückreissen. */
 static int64_t knownGoodAVDelta = 0; /* erwartete audioPts - videoPts Differenz */
-#define AV_DELTA_PLAUSIBLE_LIMIT (2LL * 90000LL)
+/* Die alte Grenze von 2,0s war fuer den kurzen Einzel-Ausreisser direkt nach
+ * einem Sprung gedacht, schuetzt aber nicht gegen eine ueber viele Minuten
+ * anhaltende Serie von Relearns (mehrere Werbespots, 15-30s auseinander). Die
+ * Grace-Period (siehe g_avDeltaRelearnGrace) ist zwischen den Relearns
+ * laengst abgelaufen, in dieser Zeit lief feedAVDeltaSample() ungebremst und
+ * hat eine echte, aber falsche ~1,2s-Differenz haeppchenweise als "plausibel"
+ * akzeptiert, bis die EMA dort ankam (beobachtet: knownGoodAVDelta bis
+ * 104.878 Ticks). Der normale/gesunde Bereich liegt bei nur +-100-115ms --
+ * 500ms liegt mit klarem Sicherheitsabstand darueber, aber weit unter den
+ * schaedlichen ~1,2s. */
+#define AV_DELTA_PLAUSIBLE_LIMIT (45000LL) /* 500ms */
 #define OTHER_TRACK_FRESHNESS_LIMIT 200
+/* Ergaenzung zum reinen Paketzaehler oben: 700ms liegt deutlich ueber
+ * normalem Demuxer-Interleaving-Jitter zwischen Audio/Video, reagiert aber
+ * schnell genug, um eine binnen Sekunden verstummende Spur (stummer
+ * Werbespot) nicht mehr als "frisch" durchgehen zu lassen. */
+#define OTHER_TRACK_FRESHNESS_US (700LL * 1000LL)
 
 /* Diagnose (2026-07-26): misst den TATSAECHLICHEN Verlauf von knownGoodAVDelta
  * direkt, statt ihn nur indirekt aus Offset-Werten verschiedener Relearn-
@@ -829,6 +857,21 @@ static void updateKnownGoodAVDelta(int64_t currentDelta, bool otherTrackFreshFor
      * spaeter legitim aendert (z.B. anders codierte Werbe-Inhalte). */
     knownGoodAVDelta += (currentDelta - knownGoodAVDelta) / AV_DELTA_EMA_DIVISOR;
 
+    /* Harte Absicherung zusaetzlich zur Plausibilitaetsgrenze oben: currentDelta
+     * ist durch den fruehen Return bereits auf +-AV_DELTA_PLAUSIBLE_LIMIT
+     * begrenzt, die EMA sollte also rein rechnerisch nie darueber hinauswandern
+     * -- dieser Clamp ist die explizite Garantie dafuer, falls knownGoodAVDelta
+     * aus einer frueheren Session/einem frueheren Zustand ausserhalb dieses
+     * Bereichs startet. */
+    if (knownGoodAVDelta > AV_DELTA_PLAUSIBLE_LIMIT)
+    {
+        knownGoodAVDelta = AV_DELTA_PLAUSIBLE_LIMIT;
+    }
+    else if (knownGoodAVDelta < -AV_DELTA_PLAUSIBLE_LIMIT)
+    {
+        knownGoodAVDelta = -AV_DELTA_PLAUSIBLE_LIMIT;
+    }
+
     if (g_verbose_logging && llabs(knownGoodAVDelta - lastLoggedAVDelta) >= AV_DELTA_LOG_STEP)
     {
         lastLoggedAVDelta = knownGoodAVDelta;
@@ -865,6 +908,67 @@ static void updateKnownGoodAVDelta(int64_t currentDelta, bool otherTrackFreshFor
 static int pendingConfirmCount = 0;
 static int64_t pendingConfirmValues[AV_DELTA_CONFIRM_COUNT];
 
+/* Mehrere kurze Werbeclips hintereinander loesen jeweils einen eigenen
+ * (kurzen) PTS-Sprung/Relearn aus -- keiner davon einzeln lang genug fuer
+ * AV_DELTA_FREEZE_GAP_SECONDS, die bestehende Bestaetigungsphase unten greift
+ * also nicht. Direkt nach einem Relearn koennen Audio- und Videopakete des
+ * neuen Clips durch Demuxer-/Segment-Puffer-Asymmetrie kurzzeitig deutlich
+ * schiefer zueinander stehen als im eingeschwungenen Zustand (beobachtet:
+ * currentDelta ~1,4s ueber mehrere Pakete). Ohne Gegenmassnahme zieht die EMA
+ * knownGoodAVDelta darauf hoch, mit permanentem A/V-Versatz als Folge. Fix:
+ * nach jedem Relearn fuer eine kurze Paketanzahl gar nicht neu lernen, bis
+ * sich beide Spuren auf der neuen Zeitachse eingependelt haben. */
+#define AV_DELTA_RELEARN_GRACE_PACKETS 60
+static int g_avDeltaRelearnGrace = 0;
+
+/* crossTarget rechnet mit dem jeweils AKTUELLEN knownGoodAVDelta. Jeder
+ * Relearn verankert seinen neuen Offset exakt auf diesem (womoeglich schon
+ * leicht verschobenen) Zielwert, wodurch das naechste gemessene currentDelta
+ * zwangslaeufig nahe am vorherigen Stand liegt und die EMA nur noch in eine
+ * Richtung weiterwandern kann -- beobachtet: mehrere aufeinanderfolgende
+ * Werbeblocke trieben den Wert schrittweise und dauerhaft hoch, nie wieder
+ * runter. Fix: sobald eine laengere Serie von Samples ohne Relearn eng
+ * beieinander liegt (100 Pakete, Streuung < 200ms, gleiches Prinzip wie die
+ * bestehende Freeze-Bestaetigungsphase oben), wird baselineAVDelta EINMALIG
+ * fest eingefroren. Ab dann zielt crossTarget auf diesen unveraenderlichen
+ * Wert statt auf den weiterhin wandernden knownGoodAVDelta, die
+ * Rueckkopplung ist damit durchbrochen. Bewusst KEIN Sonderfall fuer "erster
+ * Relearn der Session" -- ein normaler Spielfilm laeuft oft 20-45 Minuten
+ * ganz ohne Relearn durch, eine solche Einschraenkung wuerde den Lock
+ * waehrend der stoerungsfreien Filmphase blockieren und ausgerechnet im
+ * ersten Werbespot danach scharf werden lassen. Zappt man dagegen mitten in
+ * einen laufenden Werbespot, ist auch dessen eigener, fuer sich genommen
+ * gesunder A/V-Versatz (einzelne Spots sind intern selbst synchron, die
+ * Asynchronitaet entsteht erst an den Schnittkanten) ein brauchbarer
+ * Ankerpunkt -- es gibt keinen "falschen" Clip zum Einfrieren. */
+#define BASELINE_LOCK_STABLE_PACKETS 100
+#define BASELINE_LOCK_MAX_SPREAD (9000LL * 2) /* 200ms */
+/* Ein Stillstand von ueber einer Minute (ueber 100s unverschluesselte
+ * Werbesegmente beobachtet) laesst den AV-Versatz beim Wiederanlauf fuer
+ * eine ganze Weile konstant bei einem stark verzerrten, aber UNTEREINANDER
+ * konsistenten Wert liegen (beobachtet: ~488ms) -- BASELINE_LOCK_MAX_SPREAD
+ * allein schuetzt davor nicht, die prueft nur die Streuung zwischen den
+ * Samples, nie deren Absolutbetrag. Echter Sende-Lippensynchron-Versatz
+ * liegt praktisch immer deutlich unter 150ms. Dieses Limit gilt
+ * UNABHAENGIG von resumedFromLongFreeze: auch ein einzelner, aus anderem
+ * Grund unplausibler Ausreisser soll die laufende Akkumulation nie
+ * vergiften. */
+#define BASELINE_LOCK_MAX_PLAUSIBLE_DELTA (9000LL * 15 / 10) /* 150ms */
+static int64_t baselineAVDelta = 0;
+static int baselineAVDeltaLocked = 0;
+static int baselineStableCount = 0;
+static int64_t baselineStableMin = 0;
+static int64_t baselineStableMax = 0;
+static int64_t baselineStableSum = 0;
+/* Zusaetzliche Beruhigungsphase nach einem langen Freeze (siehe oben):
+ * baselineStableCount wird bei resumedFromLongFreeze zwar sofort auf 0
+ * zurueckgesetzt, aber ein danach konstant falscher Wert koennte sich
+ * innerhalb weniger Sekunden erneut auf BASELINE_LOCK_STABLE_PACKETS
+ * aufbauen, bevor sich AV-Sync/Decoderpuffer wirklich beruhigt haben. Fuer
+ * die folgenden 500 Pakete (bei 25-30fps ca. 17-20s) akkumuliert die
+ * Baseline-Lock-Schleife deshalb gar nicht erst. */
+static int g_baselineLockFreezeCooldown = 0;
+
 /* Wrapper um updateKnownGoodAVDelta(): nach einem erkannten langen Freeze
  * (resumedFromLongFreeze) werden die ersten AV_DELTA_CONFIRM_COUNT Cross-
  * Delta-Werte nur gesammelt statt sofort in die EMA zu uebernehmen. Erst wenn
@@ -875,14 +979,128 @@ static int64_t pendingConfirmValues[AV_DELTA_CONFIRM_COUNT];
  * Freeze-Wiederanlauf (oder ein neuer PTS-Sprung im Normalbetrieb) bekommt
  * dann eine neue Chance. Ausserhalb einer Bestaetigungsphase (Normalbetrieb)
  * verhaelt sich der Wrapper transparent wie ein direkter Aufruf. */
-static void feedAVDeltaSample(int64_t currentDelta, bool otherTrackFreshForDelta, bool resumedFromLongFreeze)
+static void feedAVDeltaSample(int64_t currentDelta, bool otherTrackFresh, bool otherTrackFreshForDelta, bool resumedFromLongFreeze)
 {
-    if (!otherTrackFreshForDelta || llabs(currentDelta) >= AV_DELTA_PLAUSIBLE_LIMIT)
+    if (g_avDeltaRelearnGrace > 0)
     {
-        /* Bereits durch bestehende Fresh/Trust-Pruefung bzw. Plausibilitaets-
-         * grenze blockiert -- eine laufende Bestaetigungsphase deswegen nicht
-         * abbrechen, ein einzelner ungueltiger Zwischenwert soll sie nicht
-         * neu erzwingen muessen. */
+        /* Beruhigungsphase nach einem Relearn (siehe AV_DELTA_RELEARN_GRACE_PACKETS
+         * oben): dieses Sample stammt moeglicherweise noch aus der kurzen
+         * Umstellungsphase zwischen altem und neuem Clip -- weder lernen noch
+         * als Bestaetigungswert fuer eine laufende Freeze-Confirm-Phase
+         * verwenden, und auch nicht fuer das Baseline-Lock-Tracking unten. */
+        g_avDeltaRelearnGrace--;
+        return;
+    }
+    if (llabs(currentDelta) >= AV_DELTA_PLAUSIBLE_LIMIT)
+    {
+        return;
+    }
+
+    /* Das Baseline-Lock-Tracking (siehe BASELINE_LOCK_STABLE_PACKETS oben)
+     * bewusst nur an otherTrackFresh (Paket-Aktualitaet) koppeln, NICHT an
+     * otherTrackTrusted (= otherTrackFreshForDelta unten). trusted schuetzt
+     * die EMA vor einem unsicheren "own"-Anker NACH einem Relearn --
+     * waehrend einer langen, ununterbrochenen Normalwiedergabe (kein
+     * einziger Relearn seit dem bewusst own-verankerten Sessionstart) bleibt
+     * trusted aber die GESAMTE Zeit false, obwohl die Messung hier maximal
+     * zuverlaessig ist (beide Spuren laufen unangetastet auf ihrer eigenen,
+     * realen Zeitachse). Mit der strengen trusted-Bedingung kaeme der Lock
+     * ausgerechnet in der sichersten Phase (langer stabiler Hauptfilm vor
+     * der ersten Werbung) nie zum Zug -- beobachtet: mehrere Minuten
+     * stabiler Vorlauf, Lock trotzdem nie ausgeloest, weil
+     * otherTrackFreshForDelta die ganze Zeit false war. */
+    /* Die Baseline-Lock-Akkumulation oben kannte resumedFromLongFreeze
+     * zunaechst nicht, anders als die EMA-Bestaetigungsphase weiter unten.
+     * Nach einem langen Stillstand (siehe hls.c-Discontinuity-Starvation-
+     * Fix) sprang sie sofort auf die noch verzerrten Aufholwerte an und
+     * verankerte sich innerhalb derselben Sekunde auf einem dauerhaft
+     * falschen Lippensynchron-Versatz, weil baselineAVDeltaLocked danach
+     * nie wieder zuruecksetzt. Schwellen selbst (BASELINE_LOCK_STABLE_PACKETS/
+     * _MAX_SPREAD) bewusst unangetastet gelassen, da sie bereits gegen einen
+     * aehnlichen Ratschen-Effekt hochgesetzt wurden, sie lockern wuerde genau
+     * dort wieder oeffnen. Stattdessen: nach einem erkannten langen Freeze die
+     * Akkumulation selbst verwerfen, damit sie erst wieder auf frischen,
+     * nicht mehr vom Freeze verzerrten Werten neu aufbaut. */
+    if (resumedFromLongFreeze)
+    {
+        baselineStableCount = 0;
+        g_baselineLockFreezeCooldown = 500;
+    }
+    if (g_baselineLockFreezeCooldown > 0)
+    {
+        g_baselineLockFreezeCooldown--;
+        baselineStableCount = 0;
+    }
+    /* Unplausible Einzelwerte sollen die laufende Akkumulation nie vergiften
+     * oder gar als Kandidat durchrutschen, unabhaengig von resumedFromLong-
+     * Freeze/Cooldown oben (siehe BASELINE_LOCK_MAX_PLAUSIBLE_DELTA). */
+    if (llabs(currentDelta) > BASELINE_LOCK_MAX_PLAUSIBLE_DELTA)
+    {
+        baselineStableCount = 0;
+    }
+
+    if (!baselineAVDeltaLocked && otherTrackFresh && g_baselineLockFreezeCooldown == 0 &&
+        llabs(currentDelta) <= BASELINE_LOCK_MAX_PLAUSIBLE_DELTA)
+    {
+        if (baselineStableCount == 0)
+        {
+            baselineStableMin = baselineStableMax = currentDelta;
+            baselineStableSum = currentDelta;
+            baselineStableCount = 1;
+        }
+        else
+        {
+            int64_t newMin = currentDelta < baselineStableMin ? currentDelta : baselineStableMin;
+            int64_t newMax = currentDelta > baselineStableMax ? currentDelta : baselineStableMax;
+            if ((newMax - newMin) >= BASELINE_LOCK_MAX_SPREAD)
+            {
+                baselineStableMin = baselineStableMax = currentDelta;
+                baselineStableSum = currentDelta;
+                baselineStableCount = 1;
+            }
+            else
+            {
+                baselineStableMin = newMin;
+                baselineStableMax = newMax;
+                baselineStableSum += currentDelta;
+                baselineStableCount++;
+            }
+        }
+        if (baselineStableCount >= BASELINE_LOCK_STABLE_PACKETS)
+        {
+            int64_t candidate = baselineStableSum / baselineStableCount;
+            if (llabs(candidate) <= BASELINE_LOCK_MAX_PLAUSIBLE_DELTA)
+            {
+                baselineAVDelta = candidate;
+                baselineAVDeltaLocked = 1;
+                if (g_verbose_logging)
+                {
+                    FILE *dlog = fopen("/tmp/exteplayer3_av_delta.log", "a");
+                    if (dlog)
+                    {
+                        fprintf(dlog, "%ld AV_DELTA_BASELINE_LOCKED value=%lld\n",
+                                (long)time(NULL), (long long)baselineAVDelta);
+                        fclose(dlog);
+                    }
+                }
+            }
+            else
+            {
+                /* Kann durch die Einzelwert-Pruefung oben eigentlich nicht
+                 * mehr vorkommen (jeder einzelne Sample lag ja schon
+                 * innerhalb des Limits, der Mittelwert dann erst recht) --
+                 * als zusaetzliche Absicherung trotzdem verwerfen statt
+                 * blind zu verankern. */
+                baselineStableCount = 0;
+            }
+        }
+    }
+
+    if (baselineAVDeltaLocked || !otherTrackFreshForDelta)
+    {
+        /* Entweder bereits gesperrt (EMA wird nicht mehr gebraucht) oder die
+         * Gegenspur ist fuer die EMA-Zufuehrung nicht vertrauenswuerdig genug
+         * -- das Baseline-Lock-Tracking oben lief davon unabhaengig bereits. */
         return;
     }
 
@@ -952,6 +1170,22 @@ typedef struct
      * Video per Cross-Anchor uebernommen und von knownGoodAVDelta als neuer
      * "gueltiger" Wert geglaettet wurde). */
     bool    trusted;
+    /* Manche kaputten Werbespots liefern fortlaufend wild springende
+     * Rohzeitstempel (beobachtet: >20 Relearns in ca. 1,2s, Offset-Betrag
+     * waechst dabei stark an). Die Jump-Erkennung ist bewusst so gebaut,
+     * dass JEDER einzelne Sprung > PTS_JUMP_RELEARN_THRESHOLD sofort neu
+     * verankert wird (fuer den Normalfall "ein Ad-Splice = ein Sprung"
+     * richtig), hat aber keine Bremse fuer eine Flut solcher Spruenge auf
+     * derselben Spur. Per Cross-Anchor (anchor=cross) wird ein auf diese
+     * Weise verunglueckter Relearn-Wert zudem sofort an die jeweils andere
+     * Spur weitergereicht, die dann ihrerseits neu verankert -- ein
+     * Ping-Pong, das sich gegenseitig hochschaukelt. lastRelearnMonoUs und
+     * recentRelearnCount erkennen diese Flut (siehe resolveAndCachePtsOffset)
+     * und schalten die betroffene Spur voruebergehend auf reinen Own-Anker
+     * (keine weitere Drift, Position bleibt gepinnt) und trusted=false
+     * (verhindert, dass die Gegenspur den verunglueckten Wert uebernimmt). */
+    int64_t lastRelearnMonoUs;
+    int     recentRelearnCount;
 } PtsOffsetCacheEntry_t;
 
 /* Lernt (einmalig) oder nutzt einen bereits bekannten Offset fuer einen
@@ -986,22 +1220,59 @@ static volatile int g_audioSwitchInheritOffset = 0;
 static int64_t g_lastAudioOffsetUsed = 0;
 static int g_haveLastAudioOffset = 0;
 
+/* Diagnose-Zaehler fuer den SSAI-Werbe-Standbild-Verdacht (Ton laeuft
+ * weiter, Bild friert auf dem letzten Frame vor der Werbung ein): soll
+ * trennen, ob Videopakete bei einem Werbeuebergang ueberhaupt noch vom
+ * Demuxer kommen (g_videoPacketsSeenFromDemuxer, direkt am AVPacket-Typ
+ * gemessen, VOR jedem Id-Abgleich/Routing), ob sie an der Live-
+ * Duplikatbremse haengen bleiben (isTSLiveMode, siehe lastVideoDts,
+ * g_videoPacketsDiscardedDup), oder ob sie zwar durchkommen aber am
+ * Hardware-Write scheitern (g_videoPacketsWritten/g_videoBytesWritten).
+ * Nur bei g_verbose_logging aktiv, einmal pro Sekunde eine Summenzeile nach
+ * /tmp/exteplayer3_video_pipeline.log statt pro Paket, damit auch ein
+ * stundenlanger Stillstand keine Logflut erzeugt. Zusaetzlich eine
+ * Detailzeile mit dts/lastVideoDts/pts nach
+ * /tmp/exteplayer3_video_discard.log, aber hoechstens alle 2s eine, aus
+ * demselben Grund. */
+static int64_t g_videoPacketsSeenFromDemuxer = 0;
+static int64_t g_videoPacketsDiscardedDup = 0;
+static int64_t g_videoPacketsWritten = 0;
+static int64_t g_videoBytesWritten = 0;
+static int64_t g_lastVideoPipelineLogMonoUs = 0;
+static int64_t g_lastVideoDiscardLogMonoUs = 0;
+
 static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheSize,
                                          void *streamPtr, int64_t rawPts,
                                          int64_t *lastGoodPts, int *nextSlot, const char *trackTag,
                                          int isAudio, int64_t otherTrackLastGoodPts,
                                          int64_t otherTrackPacketCounterAtLastGood,
+                                         int64_t otherTrackMonoUsAtLastGood,
                                          bool otherTrackTrusted,
                                          int64_t totalPacketCounter,
                                          int64_t *packetCounterAtLastGoodPts,
                                          time_t *wallClockAtLastGoodPts,
+                                         int64_t *monoUsAtLastGoodPts,
                                          bool *outTrusted,
                                          int64_t *sessionBasePts,
                                          bool suppressDeltaLearning)
 {
+    int64_t nowUs = av_gettime_relative();
+    /* Der reine Paketzaehler-Vergleich oben braucht bei z.B. 25fps bis zu 8s,
+     * bis eine komplett verstummte Gegenspur (keine Pakete mehr) als "nicht
+     * mehr frisch" gilt -- in der Zwischenzeit lief die andere, weiterlaufende
+     * Spur ungebremst gegen den eingefrorenen Referenzwert und riss
+     * knownGoodAVDelta auf ueber eine Sekunde. Zusaetzliche echte Zeitschranke
+     * (Mikrosekunden-Monotonic-Clock statt time_t, dessen 1s-Aufloesung in den
+     * ersten ~1,5s noch 10-15 Pakete haette durchrutschen lassen). */
     bool otherTrackFresh = (otherTrackLastGoodPts >= 0) &&
-            ((totalPacketCounter - otherTrackPacketCounterAtLastGood) < OTHER_TRACK_FRESHNESS_LIMIT);
-    int64_t crossTarget = otherTrackLastGoodPts + (isAudio ? knownGoodAVDelta : -knownGoodAVDelta);
+            ((totalPacketCounter - otherTrackPacketCounterAtLastGood) < OTHER_TRACK_FRESHNESS_LIMIT) &&
+            ((nowUs - otherTrackMonoUsAtLastGood) < OTHER_TRACK_FRESHNESS_US);
+    /* Nach dem Einfrieren (siehe BASELINE_LOCK_STABLE_PACKETS oben) zielt
+     * jeder Relearn auf den festen baselineAVDelta statt auf den potenziell
+     * weiter wandernden knownGoodAVDelta -- durchbricht die Ratschen-
+     * Rueckkopplung. */
+    int64_t effectiveAVDelta = baselineAVDeltaLocked ? baselineAVDelta : knownGoodAVDelta;
+    int64_t crossTarget = otherTrackLastGoodPts + (isAudio ? effectiveAVDelta : -effectiveAVDelta);
 
     int i;
     for (i = 0; i < cacheSize; i++)
@@ -1038,25 +1309,48 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
 
             if (needRelearn)
             {
-                /* otherTrackFresh entscheidet bereits oben, ob target der
+                /* Kaskaden-Schutz: zu viele Relearns derselben Spur in zu
+                 * kurzer Zeit deuten auf fortlaufend kaputte Rohzeitstempel
+                 * hin (statt eines einzelnen echten Ad-Splice-Sprungs). In
+                 * diesem Fall wird erzwungen auf Own-Anker umgeschaltet
+                 * (keine weitere Drift, Position bleibt gepinnt) und trusted
+                 * hart auf false gesetzt, damit die Gegenspur diesen
+                 * verunglueckten Wert nicht per Cross-Anchor uebernimmt und
+                 * das Ping-Pong sich nicht weiter hochschaukelt. */
+                if ((nowUs - cache[i].lastRelearnMonoUs) < RELEARN_STORM_WINDOW_US)
+                {
+                    cache[i].recentRelearnCount++;
+                }
+                else
+                {
+                    cache[i].recentRelearnCount = 1;
+                }
+                cache[i].lastRelearnMonoUs = nowUs;
+                bool relearnStorm = (cache[i].recentRelearnCount > RELEARN_STORM_THRESHOLD);
+
+                /* otherTrackFresh entscheidet im Normalfall, ob target der
                  * Gegenspur folgt (cross) oder nur der eigenen Historie (own)
                  * -- trusted spiegelt exakt das wider, damit ein spaeterer
                  * Cross-Anchor der Gegenspur bzw. ein knownGoodAVDelta-Update
                  * nicht auf einem rein selbstreferenziellen Offset aufbaut. */
-                int64_t target = otherTrackFresh ? crossTarget : *lastGoodPts;
+                bool useCrossAnchor = otherTrackFresh && !relearnStorm;
+                int64_t target = useCrossAnchor ? crossTarget : *lastGoodPts;
                 int64_t newOffset = rawPts - target;
                 cache[i].offset = newOffset;
-                cache[i].trusted = otherTrackFresh;
+                cache[i].trusted = useCrossAnchor;
                 corrected = applyPtsOffset(rawPts, newOffset);
+                g_avDeltaRelearnGrace = AV_DELTA_RELEARN_GRACE_PACKETS;
+                baselineStableCount = 0;
 
                 if (g_verbose_logging)
                 {
                     FILE *plog = fopen("/tmp/exteplayer3_pts_offset.log", "a");
                     if (plog)
                     {
-                        fprintf(plog, "%ld %s relearn (jump) stream=%p offset=%lld anchor=%s\n",
-                                (long)time(NULL), trackTag, streamPtr, (long long)newOffset,
-                                otherTrackFresh ? "cross" : "own");
+                        fprintf(plog, "%ld %s relearn (jump)%s stream=%p offset=%lld anchor=%s\n",
+                                (long)time(NULL), trackTag, relearnStorm ? " STORM" : "",
+                                streamPtr, (long long)newOffset,
+                                useCrossAnchor ? "cross" : "own");
                         fclose(plog);
                     }
                 }
@@ -1069,6 +1363,7 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                 bool resumedFromLongFreeze = (*wallClockAtLastGoodPts > 0) &&
                         ((now - *wallClockAtLastGoodPts) > AV_DELTA_FREEZE_GAP_SECONDS);
                 *wallClockAtLastGoodPts = now;
+                *monoUsAtLastGoodPts = nowUs;
                 if (outTrusted)
                 {
                     *outTrusted = cache[i].trusted;
@@ -1091,7 +1386,7 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                      * Aufrufstellen. */
                     if (!suppressDeltaLearning)
                     {
-                        feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+                        feedAVDeltaSample(currentDelta, otherTrackFresh, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
                     }
                 }
             }
@@ -1154,7 +1449,17 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
      * bzw. offset=rawPts-crossTarget) einheitlich, ob cross oder own/0
      * verwendet wurde -- siehe Kommentar an PtsOffsetCacheEntry_t.trusted. */
     cache[slot].trusted = otherTrackFresh;
+    /* Dieser Ring-Buffer-Slot kann einen alten, voellig unrelated
+     * Stream-Pointer wiederverwenden -- dessen Kaskaden-Zaehler (siehe
+     * PtsOffsetCacheEntry_t.recentRelearnCount) darf hier nicht nachwirken. */
+    cache[slot].lastRelearnMonoUs = 0;
+    cache[slot].recentRelearnCount = 0;
     *nextSlot = (slot + 1) % cacheSize;
+    /* Ein komplett neuer Stream-Pointer (z.B. neuer Werbespot mit eigener
+     * Rendition) braucht dieselbe Einschwingphase wie ein Relearn, siehe
+     * AV_DELTA_RELEARN_GRACE_PACKETS oben. */
+    g_avDeltaRelearnGrace = AV_DELTA_RELEARN_GRACE_PACKETS;
+    baselineStableCount = 0;
 
     if (g_verbose_logging)
     {
@@ -1177,6 +1482,7 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
         bool resumedFromLongFreeze = (*wallClockAtLastGoodPts > 0) &&
                 ((now - *wallClockAtLastGoodPts) > AV_DELTA_FREEZE_GAP_SECONDS);
         *wallClockAtLastGoodPts = now;
+        *monoUsAtLastGoodPts = nowUs;
         if (outTrusted)
         {
             *outTrusted = cache[slot].trusted;
@@ -1187,7 +1493,7 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                                             : (otherTrackLastGoodPts - corrected);
             if (!suppressDeltaLearning)
             {
-                feedAVDeltaSample(currentDelta, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
+                feedAVDeltaSample(currentDelta, otherTrackFresh, otherTrackFresh && otherTrackTrusted, resumedFromLongFreeze);
             }
         }
     }
@@ -1422,6 +1728,18 @@ static void FFMPEGThread(Context_t *context)
     strncpy(threadname, __func__, sizeof(threadname));
     threadname[16] = 0;
     prctl (PR_SET_NAME, (unsigned long)&threadname);
+
+    /* Definierter Start pro Session: knownGoodAVDelta/baselineAVDelta* sind
+     * file-scope statics und damit ohne diesen Reset ueber mehrere
+     * FFMPEGThread-Laeufe im selben Prozess hinweg sichtbar (z.B. bei
+     * Playlist-/Mehrfachwiedergabe). Ein von einer vorherigen Datei
+     * uebernommener Lock-Zustand haette mit dem neuen Stream nichts mehr zu
+     * tun. */
+    knownGoodAVDelta = 0;
+    baselineAVDelta = 0;
+    baselineAVDeltaLocked = 0;
+    baselineStableCount = 0;
+
     AVPacket   packet;
     off_t   lastSeek = -1;
     int64_t lastPts = -1;
@@ -1471,6 +1789,24 @@ static void FFMPEGThread(Context_t *context)
      * anzeigt (siehe feedAVDeltaSample). 0 = noch nie gesetzt. */
     time_t lastGoodVideoPtsWallClock = 0;
     time_t lastGoodAudioPtsWallClock = 0;
+    int64_t lastGoodVideoPtsMonoUs = 0;
+    int64_t lastGoodAudioPtsMonoUs = 0;
+    /* Waehrend PAUSE laeuft der Demuxer weiter (DVB-Puffer duerfen waehrend
+     * PAUSE weiter gefuellt werden), bis die Ausgabepuffer voll sind, dann
+     * blockiert der FFMPEGThread tief im Kernel beim blockierenden write()
+     * auf das Hardware-Device (siehe Write() oben und linuxdvb_mipsel.c).
+     * lastGoodVideoPtsMonoUs friert dadurch ein, und nach dem Fortsetzen
+     * sieht das wie die Video-Gap-Luecke unten aus, obwohl der Decoder-
+     * Puffer hier NICHT veraltet ist (der Decoder war ja ebenfalls
+     * pausiert, keine stale Daten). Ein Polling auf isPaused am
+     * Schleifenanfang greift dafuer nicht: der Thread haengt waehrend der
+     * gesamten Pause im blockierenden write()-Syscall fest und kommt gar
+     * nicht zurueck zum Schleifenanfang. Stattdessen wird hier der von
+     * PlaybackContinue() (playback.c) synchron gesetzte Zeitstempel des
+     * letzten PLAYBACK_CONTINUE verwendet: liegt der NACH dem letzten
+     * bekannten guten Videopaket, erklaert eine Pause die Luecke, und der
+     * Clear wird unterdrueckt. */
+    extern int64_t g_lastPlaybackContinueMonoUs;
     PtsOffsetCacheEntry_t videoPtsOffsetCache[PTS_OFFSET_CACHE_SIZE];
     PtsOffsetCacheEntry_t audioPtsOffsetCache[PTS_OFFSET_CACHE_SIZE];
     memset(videoPtsOffsetCache, 0, sizeof(videoPtsOffsetCache));
@@ -1844,6 +2180,34 @@ static void FFMPEGThread(Context_t *context)
              * Uebergaenge liefen deswegen minutenlang in einer PTS-Schleife). */
             AVStream *pktStream = avContextTab[cAVIdx]->streams[packet.stream_index];
 
+            /* Diagnose (siehe g_videoPacketsSeenFromDemuxer oben): direkt am
+             * AVPacket-Typ gemessen, bevor irgendeine Id-/Routing-Entscheidung
+             * greift -- zaehlt also auch Videopakete, die der spaetere
+             * Id-Abgleich faelschlich verwirft. */
+            if (g_verbose_logging && get_codecpar(pktStream)->codec_type == AVMEDIA_TYPE_VIDEO)
+            {
+                g_videoPacketsSeenFromDemuxer++;
+            }
+            if (g_verbose_logging)
+            {
+                int64_t nowUsForPipelineLog = av_gettime_relative();
+                if ((nowUsForPipelineLog - g_lastVideoPipelineLogMonoUs) > 1000000LL)
+                {
+                    g_lastVideoPipelineLogMonoUs = nowUsForPipelineLog;
+                    FILE *vplog = fopen("/tmp/exteplayer3_video_pipeline.log", "a");
+                    if (vplog)
+                    {
+                        fprintf(vplog, "%ld VIDEO_PIPELINE seenFromDemuxer=%lld discardedDup=%lld written=%lld bytesWritten=%lld\n",
+                                (long)time(NULL),
+                                (long long)g_videoPacketsSeenFromDemuxer,
+                                (long long)g_videoPacketsDiscardedDup,
+                                (long long)g_videoPacketsWritten,
+                                (long long)g_videoBytesWritten);
+                        fclose(vplog);
+                    }
+                }
+            }
+
             multiContextLastPts[cAVIdx] = calcPts(pktStream, packet.pts);
             ffmpeg_printf(200, "Ctx %d PTS: %"PRId64" PTS[1] %"PRId64"\n", cAVIdx, multiContextLastPts[cAVIdx], multiContextLastPts[1]);
 
@@ -2082,16 +2446,72 @@ static void FFMPEGThread(Context_t *context)
                 {
                     bool skipPacket = false;
                     int64_t rawVideoPts = calcPts(pktStream, packet.pts);
+                    /* Bei Werbeblocken mit reinem Logo+Ton (kein echtes
+                     * Videobild, nur Audio laeuft) bleibt der Video-Hardware-
+                     * Puffer bis zu 1,5 Minuten unberuehrt stehen. Kommt danach
+                     * das erste echte Videopaket, versucht der Broadcom-Parser
+                     * (aeltere Treiber) es an den alten Pufferinhalt
+                     * anzuhaengen und crasht mit "video PE" -> dauerhaftes
+                     * Schwarzbild (dmesg-bestaetigt). Kein Codepfad setzte bisher
+                     * nach einer langen Video-Pause ein OUTPUT_CLEAR ab (nur bei
+                     * Seek/Loop/DASH-Tonspurwechsel) - das erzwingt per
+                     * VIDEO_CLEAR_BUFFER zugleich einen Writer-Reset, der den
+                     * naechsten Keyframe wieder mit frischem SPS/PPS ausstattet
+                     * (sps_pps_in_stream wird sonst nur einmal beim Stream-Start
+                     * zurueckgesetzt, siehe h264.c). Gleiche Schwelle wie die
+                     * bestehende Freeze-Erkennung (AV_DELTA_FREEZE_GAP_SECONDS).
+                     * time(NULL) hier bewusst vermeiden: auf manchen Boxen
+                     * (32-Bit-Zeit-Kernel mit 64-Bit-time_t-Userspace) schreibt
+                     * der rohe clock_gettime-Syscall im glibc-Compat-Wrapper nur
+                     * das alte 8-Byte-timespec, die oberen 4 Byte von tv_sec
+                     * werden dadurch mit den Nanosekunden ueberschrieben --
+                     * time(NULL) springt bei jedem Aufruf um Milliarden, die
+                     * Differenz ist praktisch immer > 15s. Ergebnis: OUTPUT_CLEAR
+                     * feuert auf jedem einzelnen Videopaket, Dauerschwarzbild.
+                     * Stattdessen dieselbe monotone Mikrosekunden-Uhr wie bei
+                     * der AV-Delta-Frische-Pruefung verwenden, komplett
+                     * unabhaengig von time_t. */
+                    int64_t nowUsForGapCheck = av_gettime_relative();
+                    /* Vor resolveAndCachePtsOffset() sichern, da der Aufruf
+                     * lastGoodVideoPtsMonoUs per Pointer sofort auf "jetzt"
+                     * weiterschreibt -- fuer den Pause-Vergleich weiter unten
+                     * wird aber der ALTE Wert (letztes gutes Paket vor der
+                     * aktuellen Luecke) gebraucht. */
+                    int64_t prevGoodVideoPtsMonoUs = lastGoodVideoPtsMonoUs;
+                    bool videoWasLongGapBefore = (lastGoodVideoPtsMonoUs > 0) &&
+                            ((nowUsForGapCheck - lastGoodVideoPtsMonoUs) >
+                             (AV_DELTA_FREEZE_GAP_SECONDS * 1000000LL));
                     currentVideoPts = videoTrack->pts = pts = resolveAndCachePtsOffset(
                             videoPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
                             rawVideoPts, &lastGoodVideoPts, &videoCacheNextSlot, "VIDEO",
                             0, lastGoodAudioPts, packetCounterAtLastGoodAudioPts,
+                            lastGoodAudioPtsMonoUs,
                             lastGoodAudioPtsTrusted,
                             totalPacketCounter, &packetCounterAtLastGoodVideoPts,
                             &lastGoodVideoPtsWallClock,
+                            &lastGoodVideoPtsMonoUs,
                             &lastGoodVideoPtsTrusted,
                             &sessionBasePts,
                             use_custom_io[cAVIdx] != 0);
+                    /* Andere OUTPUT_CLEAR-Stellen (Seek, DASH-Live-Tonspurwechsel)
+                     * pruefen isPlaying/isSeeking direkt vor dem Command()-Aufruf
+                     * erneut -- sonst kann ein parallel laufender Stop/Zap-Teardown
+                     * auf demselben Video-Device im Treiber mit diesem OUTPUT_CLEAR
+                     * kollidieren (beobachtet: Kernel-Oops im FFMPEGThread selbst
+                     * beim Wegzappen mitten in einer Logo+Ton-Luecke, exteplayer3
+                     * blieb danach unkillbar haengen). Gleiche Absicherung hier
+                     * uebernehmen. */
+                    bool gapExplainedByPause = (g_lastPlaybackContinueMonoUs > prevGoodVideoPtsMonoUs);
+                    if (videoWasLongGapBefore && !gapExplainedByPause &&
+                        currentVideoPts != INVALID_PTS_VALUE &&
+                        context->playback->isPlaying && !context->playback->isSeeking)
+                    {
+                        context->output->Command(context, OUTPUT_CLEAR, "video");
+                        if (g_verbose_logging)
+                        {
+                            RAW_DEBUG_LOG("[exteplayer3] Video resumed after long gap -- forced OUTPUT_CLEAR to avoid stale decoder buffer / fresh SPS-PPS\n");
+                        }
+                    }
                     videoTrack->dts = dts = lookupCachedPtsOffset(
                             videoPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
                             calcPts(pktStream, packet.dts));
@@ -2124,14 +2544,36 @@ static void FFMPEGThread(Context_t *context)
                             skipPacket = true;
                         }
                     }
-                    
+
+                    /* Diagnose (siehe g_videoPacketsDiscardedDup oben): jeder
+                     * hier verworfene Frame zaehlt in die Pipeline-Summe,
+                     * Detailwerte aber hoechstens alle 2s, sonst flutet ein
+                     * dauerhafter Stillstand (ein verworfenes Paket pro
+                     * Frame) das Log. */
+                    if (g_verbose_logging && skipPacket)
+                    {
+                        g_videoPacketsDiscardedDup++;
+                        int64_t nowUsForDiscardLog = av_gettime_relative();
+                        if ((nowUsForDiscardLog - g_lastVideoDiscardLogMonoUs) > 2000000LL)
+                        {
+                            g_lastVideoDiscardLogMonoUs = nowUsForDiscardLog;
+                            FILE *vdlog = fopen("/tmp/exteplayer3_video_discard.log", "a");
+                            if (vdlog)
+                            {
+                                fprintf(vdlog, "%ld VIDEO_DISCARD_DUP dts=%lld lastVideoDts=%lld pts=%lld\n",
+                                        (long)time(NULL), (long long)dts, (long long)lastVideoDts, (long long)pts);
+                                fclose(vdlog);
+                            }
+                        }
+                    }
+
                     if (skipPacket)
-                    {   
+                    {
                         wrapped_packet_unref(&packet);
                         releaseMutex(__FILE__, __FUNCTION__,__LINE__);
                         continue;
                     }
-                    
+
                     ffmpeg_printf(200, "VideoTrack index = %d %"PRId64"\n",pid, currentVideoPts);
 
                     avOut.data       = packet.data;
@@ -2165,6 +2607,11 @@ static void FFMPEGThread(Context_t *context)
                         {
                             ffmpeg_err("writing data to video device failed\n");
                         }
+                        else if (g_verbose_logging)
+                        {
+                            g_videoPacketsWritten++;
+                            g_videoBytesWritten += avOut.len;
+                        }
                     }
                 }
             }
@@ -2177,9 +2624,11 @@ static void FFMPEGThread(Context_t *context)
                         audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
                         rawAudioPts, &lastGoodAudioPts, &audioCacheNextSlot, "AUDIO",
                         1, lastGoodVideoPts, packetCounterAtLastGoodVideoPts,
+                        lastGoodVideoPtsMonoUs,
                         lastGoodVideoPtsTrusted,
                         totalPacketCounter, &packetCounterAtLastGoodAudioPts,
                         &lastGoodAudioPtsWallClock,
+                        &lastGoodAudioPtsMonoUs,
                         &lastGoodAudioPtsTrusted,
                         &sessionBasePts,
                         /* Bei inject_as_pcm liefert der Decoder unten gleich
@@ -2512,9 +2961,11 @@ static void FFMPEGThread(Context_t *context)
                                 calcPts(pktStream, next_out_pts),
                                 &lastGoodAudioPts, &audioCacheNextSlot, "AUDIO",
                                 1, lastGoodVideoPts, packetCounterAtLastGoodVideoPts,
+                                lastGoodVideoPtsMonoUs,
                                 lastGoodVideoPtsTrusted,
                                 totalPacketCounter, &packetCounterAtLastGoodAudioPts,
                                 &lastGoodAudioPtsWallClock,
+                                &lastGoodAudioPtsMonoUs,
                                 &lastGoodAudioPtsTrusted,
                                 &sessionBasePts,
                                 use_custom_io[cAVIdx] != 0);

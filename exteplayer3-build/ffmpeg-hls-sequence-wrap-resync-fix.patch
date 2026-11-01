@@ -1,0 +1,66 @@
+--- ffmpeg-7.0.2/libavformat/hls.c
++++ ffmpeg-7.0.2/libavformat/hls.c
+@@ -1551,6 +1551,63 @@
+                    v->start_seq_no - v->cur_seq_no);
+             v->cur_seq_no = v->start_seq_no;
+         }
++        /* SSAI-Sequence-Wrap: Server-seitige Werbeeinblendungen setzen
++         * die Media-Sequence beim Ruecksprung zum Hauptprogramm zurueck (z.B.
++         * von 325 auf 31). cur_seq_no liegt dann WEIT VOR dem neuen Playlist-
++         * Fenster, nicht dahinter, der Reset-Zweig oben greift also nicht.
++         * Ohne diese Absicherung haelt FFmpeg das Segment faelschlich fuer noch
++         * nicht veroeffentlicht und wartet bis zu max_reload-mal (siehe
++         * container_ffmpeg.c) auf ein Segment, das nie kommt. Bei regulaerem
++         * Live-HLS wird diese Bedingung nicht ausgeloest, da cur_seq_no dort
++         * nie weiter als ein Segment ueber das aktuelle Fenster hinauslaeuft.
++         *
++         * Ziel-Segment: NICHT auf start_seq_no selbst springen, das ist das
++         * AELTESTE Segment im neuen Fenster, nicht die Live-Kante. Sondern
++         * nah an das NEUESTE verfuegbare Segment des neuen Fensters springen,
++         * aber mit einem Segment Puffer-Vorlauf (start_seq_no + n_segments - 2)
++         * statt exakt auf die Kante (n_segments - 1).
++         *
++         * n_segments - 1 (exakte Live-Kante, Puffer null) wurde live
++         * getestet (2026-10-25) und fuehrte direkt nach jedem Resync fuer
++         * ein paar Sekunden zu kurzen Bildstehern: ohne jeglichen Vorlauf
++         * verhungert der Decoder, sobald das naechste Segment auch nur einen
++         * Wimpernschlag braucht, bis sich ueber ein paar Segmente wieder ein
++         * kleiner Puffer aufgebaut hat. Ein Segment Vorlauf (n_segments - 2,
++         * bei den ueblichen 5s-Segmenten solcher Anbieter) reicht als Polster, ohne die alten
++         * unnoetigen 10-15s Ruecksprung von n_segments - 3 zurueckzuholen.
++         *
++         * Fruehere Version nutzte hier start_seq_no + max(n_segments - 3, 0),
++         * angelehnt an FFmpegs eigenes live_start_index-Default (-3) fuer
++         * den allerersten Live-Einstieg (Kaltstart, Puffer-Vorlauf noetig,
++         * bevor ueberhaupt etwas abgespielt wird). Bei einem Resync MITTEN
++         * in der laufenden Wiedergabe ist dieser Puffer-Vorlauf falsch: der
++         * Player hat schon Daten im Puffer, braucht keinen zusaetzlichen
++         * Sicherheitsabstand. Live nachgewiesen (2026-10-25,
++         * live verifiziert): bei einem typischen 5-Segment-
++         * Fenster ergab n_segments-3=2 einen unnoetigen Ruecksprung von
++         * -14,976s (exakt 3 Segmente) bei JEDEM echten Resync, auch wenn der
++         * Sequence-Wrap selbst berechtigt war (keine CDN-Jitter-Fehlauslösung
++         * - die +6-Schwelle greift hier bereits korrekt).
++         *
++         * Schwelle +1 war zu knapp: bei einem kleinen 5-Segment-Fenster
++         * reicht ein einzelner hinterherhinkender CDN-Edge-Knoten (2
++         * Segmente Jitter) schon aus, um faelschlich auszuloesen und
++         * mitten in einen laengst beendeten Werbespot zurueckzuspringen,
++         * obwohl der naechste Reload Sekunden spaeter laengst wieder die
++         * frische Playlist geliefert haette (live reproduziert,
++         * 2026-10-25). Ein echter Sequence-Wrap nach Werbe-Ruecksprung
++         * (siehe Beispiel oben: 325 auf 31) liegt dagegen immer mit
++         * riesigem Abstand ausserhalb des Fensters - +6 Segmente Toleranz
++         * aendern daran nichts, filtern aber den kleinen CDN-Jitter raus. */
++        else if (v->n_segments > 0 &&
++                 v->cur_seq_no > v->start_seq_no + v->n_segments + 6) {
++            int64_t target_seq_no = v->start_seq_no + FFMAX(v->n_segments - 2, 0);
++            av_log(v->parent, AV_LOG_WARNING,
++                   "cur_seq_no %"PRId64" is far beyond playlist window [%"PRId64" - %"PRId64"], resyncing to live edge (seq %"PRId64")\n",
++                   v->cur_seq_no, v->start_seq_no, v->start_seq_no + v->n_segments - 1, target_seq_no);
++            v->cur_seq_no = target_seq_no;
++            v->last_seq_no = target_seq_no;
++        }
+         if (v->cur_seq_no > v->last_seq_no) {
+             v->last_seq_no = v->cur_seq_no;
+             v->m3u8_hold_counters = 0;

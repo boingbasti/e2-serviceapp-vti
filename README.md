@@ -34,6 +34,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - TLS 1.3 und AVIF-Dekodierung im FFmpeg-Build für VTi 16, durch Linken gegen die nativen System-Libs des Images (OpenSSL 3.3.1, libdav1d) statt gegen veraltete Kompatibilitäts-Libs
 - Forced-Untertitelspuren werden erkannt, im Menü entsprechend gekennzeichnet und können optional automatisch aktiviert werden (nur die Forced-Spur, nie der volle Dialog)
 - Aufnahme von RTSP-/RTMP-Kamerastreams (z. B. IP-Kameras) über ServiceApp, inklusive Fix für eine fälschlich gemeldete „Festplatte voll?"-Meldung
+- Dauerhaftes Standbild bei Live-HLS-Werbeübergängen (Server-Side Ad Insertion) behoben, deutlich robusterer Bild/Ton-Gleichlauf danach
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
 

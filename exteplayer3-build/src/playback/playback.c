@@ -41,6 +41,27 @@
 /* Varaibles                     */
 /* ***************************** */
 
+/* Monotone Mikrosekunden-Uhr, Zeitpunkt des letzten PLAYBACK_CONTINUE.
+ * container_ffmpeg.c liest das per extern, um eine normale Nutzer-Pause von
+ * einer echten Video-Luecke (z.B. nach einem Werbeblock ohne Videobild) zu
+ * unterscheiden: der FFMPEGThread blockiert waehrend der Pause tief im
+ * Kernel beim Schreiben an den Hardware-Puffer und kommt dadurch nicht
+ * zuverlaessig zurueck zum eigenen Schleifenanfang, um ein Pause-Flag selbst
+ * zu beobachten -- dieser Zeitstempel wird dagegen synchron und garantiert
+ * von dem Thread gesetzt, der den PLAYBACK_CONTINUE-Befehl tatsaechlich
+ * verarbeitet.
+ *
+ * av_gettime_relative() (libavutil) statt clock_gettime()/time(): playback.c
+ * bindet bewusst kein FFmpeg ein, deshalb hier nur die reine Funktions-
+ * signatur forward-deklariert -- linkt gegen dasselbe libavutil.so, das im
+ * fertigen exteplayer3-Binary ohnehin schon vorhanden ist (container_ffmpeg.c
+ * nutzt dieselbe Funktion). clock_gettime(CLOCK_MONOTONIC) scheitert beim
+ * Linken gegen aeltere Box-glibc-Versionen an einem Time64-ABI-Problem
+ * (undefined reference to __clock_gettime64), time(NULL) ist aus einem
+ * verwandten Grund ebenfalls ungeeignet (siehe container_ffmpeg.c). */
+extern int64_t av_gettime_relative(void);
+int64_t g_lastPlaybackContinueMonoUs = 0;
+
 /* ***************************** */
 /* Prototypes                    */
 /* ***************************** */
@@ -318,6 +339,7 @@ static int32_t PlaybackContinue(Context_t  *context)
         context->output->Command(context, OUTPUT_CONTINUE, NULL);
 
         context->playback->isPaused     = 0;
+        g_lastPlaybackContinueMonoUs = av_gettime_relative();
         //context->playback->isPlaying  = 1;
         context->playback->isForwarding = 0;
         context->playback->BackWard     = 0;

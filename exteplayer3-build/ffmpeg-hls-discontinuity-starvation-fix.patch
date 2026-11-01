@@ -1,0 +1,289 @@
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -27,6 +27,14 @@
+  * https://www.rfc-editor.org/rfc/rfc8216.txt
+  */
+ 
++/* Fuer das additive Diagnose-Logging nach /tmp/exteplayer3_hls.log
++ * (2026-10-31, SSAI-Werbe-Stillstand-Untersuchung): fopen/fprintf/time.
++ * getenv fuer das Ein/Aus-Schalten per Umgebungsvariable, siehe
++ * hls_debug_log_enabled() unten. */
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++
+ #include "config_components.h"
+ 
+ #include "libavformat/http.h"
+@@ -54,6 +62,25 @@
+ 
+ #define MPEG_TIME_BASE 90000
+ #define MPEG_TIME_BASE_Q (AVRational){1, MPEG_TIME_BASE}
++/* Starvation-Schutz in hls_read_packet(), siehe starvation_count in
++ * struct playlist. */
++#define HLS_STARVATION_LIMIT 30
++
++/* Schaltet das additive HLS-Diagnose-Logging nach /tmp/exteplayer3_hls.log
++ * per Umgebungsvariable ein. Rein fuer die eigene Fehlersuche gedacht, kein
++ * Setting fuer Endnutzer: exteplayer3 setzt EXTEPLAYER3_HLS_DEBUG nur, wenn
++ * das eigene Debug-Logging-Flag (-g 1) aktiv ist (siehe verbose_logging_set()
++ * in container_ffmpeg.c). Ergebnis wird einmalig zwischengespeichert, um
++ * getenv() nicht bei jedem Segment/Paket neu aufzurufen. */
++static int hls_debug_log_enabled(void)
++{
++    static int cached = -1;
++    if (cached < 0) {
++        const char *v = getenv("EXTEPLAYER3_HLS_DEBUG");
++        cached = (v && v[0] == '1') ? 1 : 0;
++    }
++    return cached;
++}
+ 
+ /*
+  * An apple http stream consists of a playlist with media segment files,
+@@ -132,6 +159,18 @@
+     int m3u8_hold_counters;
+     int64_t cur_seg_offset;
+     int64_t last_load_time;
++    /* Zaehlt, wie oft diese Playlist in hls_read_packet() trotz bereits
++     * gepuffertem Paket (pkt->data gesetzt) NICHT als minplaylist gewaehlt
++     * wurde. Sicherheitsnetz gegen dauerhaftes Verhungern einer Spur bei
++     * SSAI-Werbeuebergaengen (siehe compare_ts_with_wrapdetect unten,
++     * 2026-10-31: Video blieb nach einem Clip-Wechsel staendig im
++     * DTS-Vergleich gegen die neu gestartete Audiospur zurueck, weil die
++     * Werbung ihre Zeitstempel bei ~0 neu beginnt, waehrend Video noch das
++     * letzte, Minuten alte Paket der Folge gepuffert hatte -- ohne Gegenmass-
++     * nahme gewinnt die juengere Spur diesen Vergleich fuer immer, die
++     * aeltere liest nie wieder vom Netz). Wird bei jeder Auswahl auf 0
++     * zurueckgesetzt. */
++    int starvation_count;
+ 
+     /* Currently active Media Initialization Section */
+     struct segment *cur_init_section;
+@@ -1384,6 +1423,26 @@
+ cleanup:
+     av_dict_free(&opts);
+     pls->cur_seg_offset = 0;
++    if (ret < 0) {
++        /* Diagnose fuer den 119s-SSAI-Werbe-Stillstand (2026-10-31): rein
++         * additives Logging, keine Verhaltensaenderung. Nur bei
++         * Fehlschlag -- der Erfolgsfall lief hier anfangs unbedingt fuer
++         * JEDES Segment jedes HLS-Streams (kein g_verbose_logging-Zugriff
++         * aus der FFmpeg-Library heraus moeglich), erzeugte dadurch im
++         * Dauerbetrieb unnoetig viel Zeilen auf der RAM-Disk /tmp. Soll
++         * klaeren, ob/wo das Oeffnen von Werbe-Segment-URLs (typischerweise
++         * key_type==KEY_NONE) fehlschlaegt, bevor am HTTP-Stack selbst
++         * etwas geaendert wird. */
++        if (hls_debug_log_enabled()) {
++            FILE *hlog = fopen("/tmp/exteplayer3_hls.log", "a");
++            if (hlog) {
++                fprintf(hlog, "%ld HLS_SEG_FAIL pls=%d seq=%lld key=%d ret=%d url=%s\n",
++                        (long)time(NULL), pls->index, (long long)pls->cur_seq_no,
++                        (int)seg->key_type, ret, seg->url);
++                fclose(hlog);
++            }
++        }
++    }
+     return ret;
+ }
+ 
+@@ -1622,10 +1681,26 @@
+         if (v->cur_seq_no >= v->start_seq_no + v->n_segments) {
+             if (v->finished)
+                 return AVERROR_EOF;
+-            while (av_gettime_relative() - v->last_load_time < reload_interval) {
+-                if (ff_check_interrupt(c->interrupt_callback))
+-                    return AVERROR_EXIT;
+-                av_usleep(100*1000);
++            {
++                /* Diagnose fuer den 119s-SSAI-Werbe-Stillstand, siehe
++                 * open_input oben -- additives Logging, keine Verhaltens-
++                 * aenderung. */
++                int64_t waitStartUs = av_gettime_relative();
++                while (av_gettime_relative() - v->last_load_time < reload_interval) {
++                    if (ff_check_interrupt(c->interrupt_callback))
++                        return AVERROR_EXIT;
++                    av_usleep(100*1000);
++                }
++                if (hls_debug_log_enabled()) {
++                    FILE *hlog = fopen("/tmp/exteplayer3_hls.log", "a");
++                    if (hlog) {
++                        fprintf(hlog, "%ld HLS_WAIT pls=%d cur=%lld window=[%lld-%lld] waited_ms=%lld\n",
++                                (long)time(NULL), v->index, (long long)v->cur_seq_no,
++                                (long long)v->start_seq_no, (long long)(v->start_seq_no + v->n_segments - 1),
++                                (long long)((av_gettime_relative() - waitStartUs) / 1000));
++                        fclose(hlog);
++                    }
++                }
+             }
+             /* Enough time has elapsed since the last reload */
+             goto reload;
+@@ -1821,11 +1896,8 @@
+ 
+     /* If playback is already in progress (we are just selecting a new
+      * playlist) and this is a complete file, find the matching segment
+-     * by counting durations. EVENT-Playlists (siehe update_duration()
+-     * weiter oben) werden hier wie "finished" behandelt, da bei ihnen
+-     * ebenfalls per Zeitstempel innerhalb des bisherigen Verlaufs gesucht
+-     * werden darf (Skyjet18, Commit 9417c033d). */
+-    if ((pls->finished || pls->type == PLS_TYPE_EVENT) && c->cur_timestamp != AV_NOPTS_VALUE) {
++     * by counting durations. */
++    if (pls->finished && c->cur_timestamp != AV_NOPTS_VALUE) {
+         find_timestamp_in_playlist(c, pls, c->cur_timestamp, &seq_no, NULL);
+         return seq_no;
+     }
+@@ -2516,6 +2588,34 @@
+     int64_t scaled_ts_a = av_rescale_q(ts_a, get_timebase(pls_a), MPEG_TIME_BASE_Q);
+     int64_t scaled_ts_b = av_rescale_q(ts_b, get_timebase(pls_b), MPEG_TIME_BASE_Q);
+ 
++    /* SSAI-Werbeuebergang / Discontinuity ueber getrennte Audio-/Video-
++     * Renditions (2026-10-31, live per GDB-Diagnose verifiziert):
++     * Beide Spuren stehen normalerweise auf demselben oder einem direkt
++     * benachbarten cur_seq_no UND ihre Zeitstempel liegen eng beieinander.
++     * Springt eine Spur schon auf das naechste (Werbe-)Segment, waehrend die
++     * andere noch das letzte Paket des alten Segments gepuffert haelt, faellt
++     * deren Rohzeitstempel schlagartig auf nahe 0 zurueck (neuer Clip, eigene
++     * Zeitbasis), waehrend die zurueckhaengende Spur noch bei ihrem alten,
++     * viele Sekunden/Minuten grossen Wert steht. Der normale Modulo-Vergleich
++     * unten haelt die alte Spur dann faelschlich fuer "in der Zukunft" und
++     * waehlt sie nie wieder, ihr Puffer wird nie frei, sie liest dauerhaft
++     * kein Byte mehr vom Netz. Erkennungsmerkmal: unterschiedliche cur_seq_no UND ein
++     * Zeitstempel-Abstand jenseits jeder normalen Segment-/Pufferabweichung
++     * (5s, bei solchen Anbietern mit 5s-Segmenten bereits ein ganzes Segment). In diesem
++     * Fall zwingend die Spur auf dem AELTEREN Segment bevorzugen, damit sie
++     * ihr altes Paket abgibt und zum neuen Segment aufschliessen kann -- das
++     * ist unabhaengig vom konkreten Anbieter immer die richtige Reaktion auf einen
++     * derartigen Clip-Wechsel, bei synchron laufenden Spuren (gleiches oder
++     * benachbartes cur_seq_no, enger Zeitabstand) greift dieser Zweig nie. */
++    if (pls_a->cur_seq_no != pls_b->cur_seq_no) {
++        int64_t diff = scaled_ts_a - scaled_ts_b;
++        if (diff < 0)
++            diff = -diff;
++        if (diff > 5LL * MPEG_TIME_BASE) {
++            return pls_a->cur_seq_no < pls_b->cur_seq_no ? -1 : 1;
++        }
++    }
++
+     return av_compare_mod(scaled_ts_a, scaled_ts_b, 1LL << 33);
+ }
+ 
+@@ -2538,6 +2638,19 @@
+                 struct segment *seg = NULL;
+                 ret = av_read_frame(pls->ctx, pls->pkt);
+                 if (ret < 0) {
++                    /* Diagnose fuer den 119s-SSAI-Werbe-Stillstand, siehe
++                     * open_input oben -- additives Logging, keine
++                     * Verhaltensaenderung. Nur bei echtem Fehler/EOF, nicht
++                     * bei jedem einzelnen erfolgreichen Paket. */
++                    if (hls_debug_log_enabled()) {
++                        FILE *hlog = fopen("/tmp/exteplayer3_hls.log", "a");
++                        if (hlog) {
++                            fprintf(hlog, "%ld HLS_READ_FAIL pls=%d cur_seq_no=%lld ret=%d eof=%d\n",
++                                    (long)time(NULL), pls->index, (long long)pls->cur_seq_no,
++                                    ret, avio_feof(&pls->pb.pub));
++                            fclose(hlog);
++                        }
++                    }
+                     if (!avio_feof(&pls->pb.pub) && ret != AVERROR_EOF)
+                         return ret;
+                     break;
+@@ -2603,6 +2716,34 @@
+         }
+     }
+ 
++    /* Starvation-Schutz (siehe starvation_count-Kommentar in struct playlist
++     * oben): falls compare_ts_with_wrapdetect() trotz der Discontinuity-
++     * Erkennung irgendeinen Randfall nicht abfaengt, darf eine Spur mit
++     * bereits gepuffertem Paket nie laenger als HLS_STARVATION_LIMIT
++     * Aufrufe hintereinander ignoriert werden -- erzwingt dann deren
++     * Auswahl unabhaengig vom Zeitstempel-Vergleich. Bei solchen 5s-
++     * Segmenten und AAC-Frames von ca. 21ms entspricht das einem kaum
++     * wahrnehmbaren Stotterer von unter einer Sekunde statt eines
++     * dauerhaften Standbilds. */
++    for (i = 0; i < c->n_playlists; i++) {
++        struct playlist *pls = c->playlists[i];
++        if (pls->needed && pls->pkt->data && pls->starvation_count >= HLS_STARVATION_LIMIT) {
++            minplaylist = i;
++            break;
++        }
++    }
++
++    if (minplaylist >= 0) {
++        for (i = 0; i < c->n_playlists; i++) {
++            struct playlist *pls = c->playlists[i];
++            if (i == minplaylist) {
++                pls->starvation_count = 0;
++            } else if (pls->needed && pls->pkt->data) {
++                pls->starvation_count++;
++            }
++        }
++    }
++
+     /* If we got a packet, return it */
+     if (minplaylist >= 0) {
+         struct playlist *pls = c->playlists[minplaylist];
+@@ -2640,7 +2781,48 @@
+         }
+ 
+         ist = pls->ctx->streams[pls->pkt->stream_index];
+-        st = pls->main_streams[pls->pkt->stream_index];
++
++        /* SSAI-Werbeclips ohne eigene Tonspur (2026-10-31, per
++         * GDB auf dem laufenden Prozess verifiziert): Episode/Bumper liefern
++         * Audio auf Subdemuxer-Index 0 / Video auf Index 1, ein spaeterer,
++         * anders aufgebauter Spot aber Video auf Index 0 / Timed-ID3 auf
++         * Index 1. Die rein indexbasierte Zuordnung unten (vorher: st =
++         * pls->main_streams[pls->pkt->stream_index]) bindet das Video dann
++         * faelschlich an main_streams[0], das exteplayer3 als "Audio"
++         * verworfen hat (manche Anbieter nutzen eine separate Audio-Rendition) -- der
++         * tatsaechlich aktive Video-Slot (main_streams[1]) bekommt nie
++         * wieder ein Paket, dauerhaftes Standbild bis zum naechsten Segment
++         * mit wieder "normaler" Reihenfolge (hier: 69s). main_streams[]
++         * wird ausserdem nur EINMAL pro Index befuellt (siehe update_
++         * streams_from_subdemuxer oben) und nie neu zugeordnet, wenn ein
++         * spaeteres Segment eine andere interne Reihenfolge hat. Deshalb
++         * hier nach codec_type suchen statt blind den Index zu uebernehmen,
++         * einen bereits aktiven Stream (discard < AVDISCARD_ALL) bevorzugen.
++         * Gibt es keinen main_stream mit passendem Typ (z.B. Timed-ID3, fuer
++         * das nie ein eigener Slot angelegt wurde), wird das Paket verworfen
++         * statt einen typfremden Stream zu verwirren bzw. dessen Codec-Infos
++         * zu ueberschreiben. */
++        st = NULL;
++        {
++            int j, fallback_idx = -1;
++            for (j = 0; j < pls->n_main_streams; j++) {
++                if (pls->main_streams[j]->codecpar->codec_type == ist->codecpar->codec_type) {
++                    if (fallback_idx < 0)
++                        fallback_idx = j;
++                    if (pls->main_streams[j]->discard < AVDISCARD_ALL) {
++                        st = pls->main_streams[j];
++                        break;
++                    }
++                }
++            }
++            if (!st && fallback_idx >= 0)
++                st = pls->main_streams[fallback_idx];
++        }
++
++        if (!st) {
++            av_packet_unref(pls->pkt);
++            return hls_read_packet(s, pkt);
++        }
+ 
+         av_packet_move_ref(pkt, pls->pkt);
+         pkt->stream_index = st->index;
+@@ -2651,8 +2833,12 @@
+                                             AV_TIME_BASE_Q);
+ 
+         /* There may be more situations where this would be useful, but this at least
+-         * handles newly probed codecs properly (i.e. request_probe by mpegts). */
+-        if (ist->codecpar->codec_id != st->codecpar->codec_id) {
++         * handles newly probed codecs properly (i.e. request_probe by mpegts).
++         * codec_type-Gleichheit ist durch die Suche oben bereits garantiert,
++         * zusaetzliche Absicherung gegen versehentliches Ueberschreiben eines
++         * falsch zugeordneten Streams. */
++        if (ist->codecpar->codec_type == st->codecpar->codec_type &&
++            ist->codecpar->codec_id   != st->codecpar->codec_id) {
+             ret = set_stream_info_from_input_stream(st, pls, ist);
+             if (ret < 0) {
+                 return ret;

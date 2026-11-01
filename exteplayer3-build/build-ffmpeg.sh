@@ -43,6 +43,10 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-skyjet183-upstream-sync.patch"
     echo "=== Appliere DASH-HTTP-Options-Fix (kein unaufgefordertes Range bei eigenstaendigen Segmentdateien) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-dash-http-options.patch"
+    echo "=== Appliere HLS-Sequence-Wrap-Resync-Fix (Werbeblock-Deadlock bei Media-Sequence-Reset) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-hls-sequence-wrap-resync-fix-6.1.1.patch"
+    echo "=== Appliere HLS-Discontinuity-Starvation-Fix (Werbeuebergang-Standbild durch Stream-Starvation/Remapping) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/ffmpeg-hls-discontinuity-starvation-fix.patch"
 fi
 
 cd "ffmpeg-${FFMPEG_VER}"

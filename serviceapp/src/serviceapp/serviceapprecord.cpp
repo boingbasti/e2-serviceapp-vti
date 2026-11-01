@@ -175,7 +175,7 @@ void eServiceAppRecord::writeMetaFile(long long length, long long filesize)
 namespace {
 
 // Extrem schneller Vorfilter ohne jede I/O: eine URL kann nur dann DASH
-// sein, wenn sie auf ein MPD-Manifest verweist. Zattoo/PlutoTV/Mediatheken/
+// sein, wenn sie auf ein MPD-Manifest verweist. Zattoo/Mediatheken/
 // HLS (.m3u8)/lokale Dateien laufen hier in Mikrosekunden durch, ohne dass
 // je ein Netzwerk-Request/FFmpeg-Aufruf stattfindet. Notwendig, weil ein
 // bedingungsloser Oeffnungsversuch (siehe Nachtrag unten) bei URLs mit
@@ -494,7 +494,7 @@ RESULT eServiceAppRecord::start(bool simulate)
 	// Fall eine UHD-H.264-Variante, die diese Box hardwareseitig gar nicht
 	// dekodieren kann (Bild bleibt schwarz, Ton laeuft weiter). Der schnelle
 	// isPotentialDashUrl()-Vorfilter stellt sicher, dass fuer alle anderen
-	// URLs (Zattoo, PlutoTV, HLS, lokale Dateien) ueberhaupt kein Oeffnungs-
+	// URLs (Zattoo, HLS, lokale Dateien) ueberhaupt kein Oeffnungs-
 	// versuch/Netzwerk-Request stattfindet.
 	if (isPotentialDashUrl(cleanUrl))
 	{
