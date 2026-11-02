@@ -125,7 +125,7 @@ VTi basiert auf einer älteren, geschlossenen Enigma2-Version mit eigenem Speich
 
 ## FFmpeg
 
-Eigener Cross-Build aus dem offiziellen Vanilla-Tarball, mit einer kleineren, auf HLS-Wiedergabe zugeschnittenen Konfiguration statt einer allgemeinen Distribution:
+Eigener Cross-Build aus dem offiziellen Vanilla-Tarball (Version 6.1.1 für VTi 15 ARM/MIPS, 7.0.2 für VTi 16, siehe VTi-16-Abschnitt unten für den Hintergrund zur Versionsumstellung), mit einer kleineren, auf HLS-Wiedergabe zugeschnittenen Konfiguration statt einer allgemeinen Distribution:
 
 - `--cpu=cortex-a15` statt `generic`, `--enable-neon`/`--enable-vfp` aktiv — spürbar bessere Decoding-Performance auf ARMv7.
 - `libx264`, `libbluray`, `librtmp`, `bzlib`, `avdevice` bewusst deaktiviert (auf der Box nicht benötigt, spart RAM/Flash).

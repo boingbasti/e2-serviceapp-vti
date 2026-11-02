@@ -21,9 +21,9 @@ Dieses Repository baut auf mehreren fremden Open-Source-Projekten auf. Der eigen
 - **Lizenz:** GPL-2.0-or-later (siehe Lizenzheader in den einzelnen Quelldateien, z. B. `src/main/exteplayer.c`)
 - **Eigene Änderungen:** fread-Fix, MOV_TEXT-Untertitel-Unterstützung, X-DRM-Api-Level-Header, HLS-native-Preselect-Integration (`hls_quality_mode`, `hls_audio_default_only`), Netzwerk-Timeout-Erkennung über `AVERROR_EOF`, glibc-Kompatibilitätsschicht für ARM/MIPS
 
-## FFmpeg (Build-Rezept unter `exteplayer3-build/`, `mips/exteplayer3-build/`)
+## FFmpeg (Build-Rezept unter `exteplayer3-build/`, `mips/exteplayer3-build/`, `vti16/exteplayer3-build/`)
 
-- **Herkunft:** [ffmpeg.org](https://ffmpeg.org/), Version 6.1.1
+- **Herkunft:** [ffmpeg.org](https://ffmpeg.org/), Version 6.1.1 (VTi 15 ARM/MIPS) bzw. 7.0.2 (VTi 16, siehe CHANGELOG-Abschnitt „VTi 16" für den Hintergrund zur Versionsumstellung)
 - **Lizenz:** GPL/LGPL, abhängig von den Compile-Flags (siehe `LICENSE.md`/`COPYING.GPLv2` im offiziellen FFmpeg-Quellpaket, hier nicht mitgeliefert)
 - Der FFmpeg-Quellcode selbst ist **nicht** Teil dieses Repositories, nur das eigene Build-Rezept (`build-ffmpeg.sh`, `package-ffmpeg-ipk.sh`) und eigene bzw. übernommene Patches:
 - **Eigener Patch:** `exteplayer3-build/ffmpeg-hls-native-preselect.patch` — native HLS-Stream-Vorauswahl direkt im HLS-Demuxer (`libavformat/hls.c`), um unnötige Sub-Playlist-Downloads bei Multi-Bitrate/Multi-Audio-Streams zu vermeiden (Details in `docs/hls_preselection_documentation.md`)
@@ -45,3 +45,15 @@ Dieses Repository baut auf mehreren fremden Open-Source-Projekten auf. Der eigen
 - **Herkunft:** [zlib](https://zlib.net/)
 - **Lizenz:** zlib License
 - Wird als Systembibliothek für den Cross-Build benötigt (siehe `build-ffmpeg.sh`), ist nicht Teil dieses Repositories.
+
+## libxml2
+
+- **Herkunft:** [libxml2](https://gitlab.gnome.org/GNOME/libxml2)
+- **Lizenz:** MIT
+- Wird für den FFmpeg-`dash`-Demuxer benötigt. Nicht mitgeliefert, sondern zur Laufzeit gegen die bereits im VTi-Feed vorhandene Version gelinkt (als `Depends` eingetragen), ist nicht Teil dieses Repositories.
+
+## libdav1d (VTi 16)
+
+- **Herkunft:** [dav1d](https://code.videolan.org/videolan/dav1d)
+- **Lizenz:** BSD-2-Clause
+- Nur für den VTi-16-Build (`--enable-libdav1d`), für AVIF-Dekodierung. Nicht mitgeliefert, sondern zur Laufzeit gegen die bereits im VTi-16-Image vorhandene Version (`libdav1d.so.7`) gelinkt, ist nicht Teil dieses Repositories.
