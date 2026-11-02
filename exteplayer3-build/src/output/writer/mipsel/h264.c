@@ -182,98 +182,138 @@ static int32_t UpdateExtraData(uint8_t **ppExtraData, uint32_t *pExtraDataSize, 
     return 0;
 }
 
+#define AVCC_TMP_SIZE 2048
+
+/* Loggt Profil/Level eines SPS. Kein Downgrade auf Level 4.1 mehr: ein zu
+ * niedrig gemeldeter Level laesst den Decoder mit zu wenig Makroblock-
+ * Durchsatz/Puffer planen, obwohl der echte Bildinhalt mehr braucht - das
+ * verursacht sichtbare Bildstoerungen bei Level->4.1-Material (z.B.
+ * 1080p60), waehrend der Broadcom-Decoder Level 4.2 nachweislich korrekt
+ * verarbeitet (per GstPlayer-Vergleichstest bestaetigt). Echten Level
+ * unveraendert lassen. */
+static void LogSpsProfileAndLevel(const unsigned char *sps, unsigned int len)
+{
+    static const uint8_t profile_num[] = { 66, 77, 88, 100 };
+    static const char *const profile_str[] = { "baseline", "main", "extended", "high" };
+
+    if (len < 4 || sps[0] != 0x67)
+    {
+        return;
+    }
+    for (unsigned int i = 0; i < 4; ++i)
+    {
+        if (sps[1] == profile_num[i])
+        {
+            uint8_t level_org = sps[3];
+            h264_printf(10, "H264 %s profile@%d.%d", profile_str[i], level_org / 10, level_org % 10);
+            return;
+        }
+    }
+}
+
+/* Haengt "count" Parametersaetze (2-Byte-Laenge + Daten je Eintrag) aus dem
+ * avcC-Header mit Annex-B-Startcode an "out" an. 0 bei Erfolg, -1 wenn die
+ * Daten abgeschnitten sind oder der Ausgabepuffer nicht reicht. */
+static int AppendParamSets(const unsigned char *data, unsigned int cd_len, unsigned int *cd_pos,
+                            unsigned int count, unsigned char *out, unsigned int *out_len, int is_sps)
+{
+    for (unsigned int n = 0; n < count; ++n)
+    {
+        unsigned int pos = *cd_pos;
+        unsigned int len;
+
+        if (cd_len < pos + 2)
+        {
+            return -1;
+        }
+        len = (data[pos] << 8) | data[pos + 1];
+        pos += 2;
+        if (cd_len < pos + len || *out_len + sizeof(Head) + len > AVCC_TMP_SIZE)
+        {
+            return -1;
+        }
+
+        memcpy(out + *out_len, Head, sizeof(Head));
+        *out_len += sizeof(Head);
+        memcpy(out + *out_len, data + pos, len);
+        if (is_sps)
+        {
+            LogSpsProfileAndLevel(out + *out_len, len);
+        }
+        *out_len += len;
+        *cd_pos = pos + len;
+    }
+    return 0;
+}
+
 static int32_t PreparCodecData(unsigned char *data, unsigned int cd_len, unsigned int *NalLength)
 {
-    h264_printf(10, "H264 check codec data..!\n");
-    int32_t ret = -100;
-    if (data)
-    {
-        unsigned char tmp[2048];
-        unsigned int tmp_len = 0;
+    unsigned char tmp[AVCC_TMP_SIZE];
+    unsigned int tmp_len = 0;
+    unsigned int cd_pos = 6;
+    unsigned int num_sps = 0;
+    unsigned int num_pps = 0;
+    int32_t ret = 0;
 
-        unsigned int cd_pos = 0;
-        h264_printf(10, "H264 have codec data..!\n");
-        if (cd_len > 7 && data[0] == 1)
-        {
-            unsigned short len = (data[6] << 8) | data[7];
-            if (cd_len >= (len + 8))
-            {
-                unsigned int i=0;
-                uint8_t profile_num[] = { 66, 77, 88, 100 };
-                uint8_t profile_cmp[2] = { 0x67, 0x00 };
-                const char *profile_str[] = { "baseline", "main", "extended", "high" };
-                memcpy(tmp, Head, sizeof(Head));
-                tmp_len += 4;
-                memcpy(tmp + tmp_len, data + 8, len);
-                for (i = 0; i < 4; ++i)
-                {
-                    profile_cmp[1] = profile_num[i];
-                    if (!memcmp(tmp+tmp_len, profile_cmp, 2))
-                    {
-                        uint8_t level_org = tmp[tmp_len + 3];
-                        // Kein Downgrade auf Level 4.1 mehr: ein zu niedrig gemeldeter Level
-                        // laesst den Decoder mit zu wenig Makroblock-Durchsatz/Puffer planen,
-                        // obwohl der echte Bildinhalt mehr braucht - das verursacht sichtbare
-                        // Bildstoerungen bei Level->4.1-Material (z.B. 1080p60), waehrend der
-                        // Broadcom-Decoder Level 4.2 nachweislich korrekt verarbeitet (per
-                        // GstPlayer-Vergleichstest bestaetigt). Echten Level unveraendert lassen.
-                        h264_printf(10, "H264 %s profile@%d.%d", profile_str[i], level_org / 10 , level_org % 10);
-                        break;
-                    }
-                }
-                tmp_len += len;
-                cd_pos = 8 + len;
-                if (cd_len > (cd_pos + 2))
-                {
-                    len = (data[cd_pos + 1] << 8) | data[cd_pos + 2];
-                    cd_pos += 3;
-                    if (cd_len >= (cd_pos+len))
-                    {
-                        memcpy(tmp+tmp_len, "\x00\x00\x00\x01", 4);
-                        tmp_len += 4;
-                        memcpy(tmp+tmp_len, data+cd_pos, len);
-                        tmp_len += len;
-                        
-                        CodecData = malloc(tmp_len);
-                        memcpy(CodecData, tmp, tmp_len);
-                        CodecDataLen = tmp_len;
-                        
-                        *NalLength = (data[4] & 0x03) + 1;
-                        ret = 0;
-                    }
-                    else
-                    {
-                        h264_printf(10, "codec_data too short(4)");
-                        ret = -4;
-                    }
-                }
-                else
-                {
-                    h264_printf(10,  "codec_data too short(3)");
-                    ret = -3;
-                }
-            }
-            else
-            {
-                h264_printf(10, "codec_data too short(2)");
-                ret = -2;
-            }
-        }
-        else if (cd_len <= 7)
-        {
-            h264_printf(10, "codec_data too short(1)");
-            ret = -1;
-        }
-        else
-        {
-            h264_printf(10, "wrong avcC version %d!", data[0]);
-        }
+    h264_printf(10, "H264 check codec data..!\n");
+    if (!data)
+    {
+        *NalLength = 0;
+        return -100;
+    }
+    h264_printf(10, "H264 have codec data..!\n");
+    if (cd_len <= 7)
+    {
+        h264_printf(10, "codec_data too short(1)");
+        return -1;
+    }
+    if (data[0] != 1)
+    {
+        h264_printf(10, "wrong avcC version %d!", data[0]);
+        return -100;
+    }
+
+    /* Alle SPS und alle PPS aus avcC uebernehmen, nicht nur die ersten.
+     * Manche Live-Streams nutzen ein zweites PPS (z.B. gewichtete
+     * Bi-Praediktion fuer B-Slices bei Helligkeitswechseln) und wiederholen
+     * es nie im Stream selbst - ohne es fehlt dem Hardware-Decoder ein
+     * Parametersatz, was auf Broadcom-Boxen zu Bildstoerungen fuehrt. Bei
+     * Streams mit nur 1 SPS/1 PPS ist die Ausgabe bitgenau wie vorher. */
+    num_sps = data[5] & 0x1f;
+    if (AppendParamSets(data, cd_len, &cd_pos, num_sps, tmp, &tmp_len, 1) != 0)
+    {
+        h264_printf(10, "codec_data too short(2)");
+        ret = -2;
+    }
+    else if (cd_len < cd_pos + 1)
+    {
+        h264_printf(10, "codec_data too short(3)");
+        ret = -3;
     }
     else
     {
-        *NalLength = 0;
+        num_pps = data[cd_pos];
+        cd_pos += 1;
+        if (AppendParamSets(data, cd_len, &cd_pos, num_pps, tmp, &tmp_len, 0) != 0)
+        {
+            h264_printf(10, "codec_data too short(4)");
+            ret = -4;
+        }
+        else if (num_sps == 0 || num_pps == 0)
+        {
+            h264_printf(10, "codec_data without SPS/PPS");
+            ret = -3;
+        }
     }
-    
+
+    if (ret == 0)
+    {
+        CodecData = malloc(tmp_len);
+        memcpy(CodecData, tmp, tmp_len);
+        CodecDataLen = tmp_len;
+        *NalLength = (data[4] & 0x03) + 1;
+        h264_printf(10, "H264 codec data: %u SPS, %u PPS, %u bytes", num_sps, num_pps, tmp_len);
+    }
     return ret;
 }
 

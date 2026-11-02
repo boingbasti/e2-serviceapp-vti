@@ -34,25 +34,28 @@ void PlayerApp::handleOutput(const std::string& mydata)
 	{
 		if (truncated)
 		{
-			if (mydata[pos-1] != '}')
+			/* Nicht-JSON-Zeile (z.B. Treiber-Debug-Text, der sich mit dem
+			 * JSON-Steuerprotokoll denselben stderr-Kanal teilt) nur fuer
+			 * diese eine Zeile verwerfen, nicht per return den kompletten
+			 * restlichen Lesepuffer inklusive aller darauf folgenden,
+			 * gueltigen JSON-Zeilen wegwerfen (war vorher der Fall). */
+			if (mydata[pos-1] == '}')
 			{
-				jsonstr = "";
-				truncated = 0;
-				return;
+				handleJsonStr(jsonstr + mydata.substr(startpos, pos - startpos));
 			}
-			handleJsonStr(jsonstr + mydata.substr(startpos, pos - startpos));
 			jsonstr = "";
 			truncated = 0;
 		}
 		else
 		{
-			if (mydata[0] != '{')
+			/* mydata[startpos] statt mydata[0]: der Start dieser konkreten
+			 * Zeile entscheidet, nicht das erste Byte des gesamten Puffers
+			 * (das bei spaeteren Zeilen im selben Puffer nichts mehr ueber
+			 * die aktuelle Zeile aussagt). */
+			if (mydata[startpos] == '{')
 			{
-				jsonstr = "";
-				truncated = 0;
-				return;
+				handleJsonStr(mydata.substr(startpos, pos - startpos));
 			}
-			handleJsonStr(mydata.substr(startpos, pos - startpos));
 			jsonstr = "";
 			truncated = 0;
 		}

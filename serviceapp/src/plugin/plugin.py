@@ -181,6 +181,7 @@ config_serviceapp.servicemp3.player                     = ConfigSelection(defaul
 
 config_serviceapp.debug_logging                         = ConfigBoolean(default=False)
 config_serviceapp.picon_sync                            = ConfigBoolean(default=False)
+config_serviceapp.probe_movie_length                    = ConfigBoolean(default=True)
 
 config_serviceapp.options                               = ConfigSubDict()
 config_serviceapp.options["servicemp3"]                 = ConfigSubsection()
@@ -256,6 +257,7 @@ def subtitle_config_key(key):
 
 def init_serviceapp_settings():
     debug_logging = config_serviceapp.debug_logging.value
+    probe_movie_length = config_serviceapp.probe_movie_length.value
 
     for key in config_serviceapp.options.keys():
         setting_id           = key_to_setting_id(key)
@@ -269,7 +271,7 @@ def init_serviceapp_settings():
 
         serviceapp_client.setServiceAppSettings(setting_id, hls_explorer,
                 autoselect_stream, connection_speed_kb, autoturnon_subtitles, hls_audio_filter,
-                debug_logging)
+                debug_logging, probe_movie_length)
 
     for key in config_serviceapp.gstplayer.keys():
         setting_id = key_to_setting_id(key)
@@ -420,6 +422,8 @@ class ServiceAppSettings(ConfigListScreen, Screen):
             config_serviceapp.debug_logging, _("Enable verbose diagnostic logging to /tmp/serviceapp.log (a RAM disk on this box). Leave off for normal use, only enable it temporarily when troubleshooting a playback issue.")))
         config_list.append(getConfigListEntry(_("Automated Picon Sync for 5001/5002"),
             config_serviceapp.picon_sync, _("Automatically create symlinks for 5001/5002 channels to standard DVB (1) picons.")))
+        config_list.append(getConfigListEntry(_("Probe recording length (ffprobe)"),
+            config_serviceapp.probe_movie_length, _("Needed for progress bars in movie lists (AEL, OpenWebif). Can slow down large network libraries noticeably - disable if movie lists load slowly.")))
         if config_serviceapp.servicemp3.replace.value:
             configlist_servicemp3 = [getConfigListEntry("", ConfigNothing())]
             configlist_servicemp3.append(getConfigListEntry(_("ServiceMp3 (%s)" % str(serviceapp_client.ID_SERVICEMP3)), ConfigNothing()))

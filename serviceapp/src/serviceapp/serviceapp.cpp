@@ -65,6 +65,17 @@ int debugLvl = 4; // lvlDebug
    filling /tmp (a RAM disk on these boxes) during long playback sessions. */
 bool g_debugLoggingEnabled = false;
 
+/* Controls eStaticServiceAppInfo::getLength() (siehe dort): ermittelt die
+   reale Laufzeit nie abgespielter Dateien per ffprobe-Header-Scan, u.a.
+   fuer Movie-Wall-Ansichten von Drittanbieter-Plugins (AEL, OpenWebif).
+   Jede Datei muss dafuer einmal angefasst werden - bei einer grossen
+   Bibliothek ueber ein Netzwerk-Share kann sich das deutlich summieren,
+   vor allem wenn ein Plugin wie AEL dabei synchron im Hauptthread ueber
+   die komplette Sammlung iteriert. Standardmaessig an (das Feature ist
+   seit Monaten aktiv, niemand soll es stillschweigend verlieren), ueber
+   "Probe recording length (ffprobe)" im Setup abschaltbar. */
+bool g_probeMovieLengthEnabled = true;
+
 /* Same problem for eDebugImpl(int flags, const char*, ...), the actual logging
    function behind the eDebug()/eLog() macros: not exported by the real enigma2
    binary either, so provide my own implementation writing to /tmp/serviceapp.log
@@ -1876,6 +1887,9 @@ RESULT eStaticServiceAppInfo::getName(const eServiceReference &ref, std::string 
 // bewusst NICHT als Member dieser Klasse, siehe Kommentar in serviceapp.h.
 int eStaticServiceAppInfo::getLength(const eServiceReference &ref)
 {
+	if (!g_probeMovieLengthEnabled)
+		return -1;
+
 	if (!isLocalFilePath(ref.path))
 		return -1;
 
@@ -2184,8 +2198,9 @@ serviceapp_set_setting(PyObject *self, PyObject *args)
 	   bestehende Zustand unangetastet (fremde Plugins ohne Kenntnis dieses
 	   Parameters duerfen das Logging nicht mehr ungewollt abschalten). */
 	char debugLoggingParam = -1;
+	char probeMovieLengthParam = -1;
 
-	if (!PyArg_ParseTuple(args, "ibbIib|b", &settingId, &HLSExplorer, &autoSelectStream, &connectionSpeedInKb, &autoTurnOnSubtitles, &HLSAudioFilter, &debugLoggingParam))
+	if (!PyArg_ParseTuple(args, "ibbIib|bb", &settingId, &HLSExplorer, &autoSelectStream, &connectionSpeedInKb, &autoTurnOnSubtitles, &HLSAudioFilter, &debugLoggingParam, &probeMovieLengthParam))
 		return NULL;
 
 	/* Process-wide, not per-options-struct: applies regardless of which settingId
@@ -2196,6 +2211,8 @@ serviceapp_set_setting(PyObject *self, PyObject *args)
 		g_debugLoggingEnabled = (debugLoggingParam != 0);
 		debugLvl = g_debugLoggingEnabled ? 4 /* lvlDebug */ : 2 /* lvlWarning */;
 	}
+	if (probeMovieLengthParam != -1)
+		g_probeMovieLengthEnabled = (probeMovieLengthParam != 0);
 
 	eServiceAppOptions *options = NULL;
 	switch (settingId)
@@ -2272,6 +2289,7 @@ static PyMethodDef serviceappMethods[] = {
 	 " connectionSpeedInKb - defines bitrate in kilobits/s according to which will be selected stream from playlist <0, max(int32_t)>\n"
 	 " autoTurnOnSubtitles - auto turn on subtitles if available (0=Off, 1=Forced only, 2=All; True/False bleiben als 1/0 kompatibel)\n"
 	 " debugLoggingEnabled - optional, (True, False), default False (process-wide, not per setting_id)\n"
+	 " probeMovieLengthEnabled - optional, (True, False), default True (process-wide, not per setting_id) - requires debugLoggingEnabled to be passed too (varargs order)\n"
 	},
 	 {NULL,NULL,0,NULL}
 };
@@ -2295,6 +2313,7 @@ static void pre_fault_bss(void) {
 	   Must be pre-faulted here too, before Python can ever call the setter. */
 	p = (volatile char *)&g_debugLoggingEnabled; *p = *p;
 	p = (volatile char *)&debugLvl; *p = *p;
+	p = (volatile char *)&g_probeMovieLengthEnabled; *p = *p;
 }
 #endif
 

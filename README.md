@@ -35,6 +35,7 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Forced-Untertitelspuren werden erkannt, im Menü entsprechend gekennzeichnet und können optional automatisch aktiviert werden (nur die Forced-Spur, nie der volle Dialog)
 - Aufnahme von RTSP-/RTMP-Kamerastreams (z. B. IP-Kameras) über ServiceApp, inklusive Fix für eine fälschlich gemeldete „Festplatte voll?"-Meldung
 - Dauerhaftes Standbild bei Live-HLS-Werbeübergängen (Server-Side Ad Insertion) behoben, deutlich robusterer Bild/Ton-Gleichlauf danach
+- Mehrfache Bildparameter (SPS/PPS) aus dem avcC-Header werden jetzt alle übernommen, behebt Klötzchenbildung bei manchen Live-DASH-Diensten
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
 

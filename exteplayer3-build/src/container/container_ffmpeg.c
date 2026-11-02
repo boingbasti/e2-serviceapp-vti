@@ -323,12 +323,15 @@ void verbose_logging_set(const int32_t val)
      * dortige, nur fuer die eigene Fehlersuche gedachte Diagnose-Logging
      * durchreichen (siehe EXTEPLAYER3_HLS_DEBUG in hls.c). */
     setenv("EXTEPLAYER3_HLS_DEBUG", val ? "1" : "0", 1);
-    /* LINUXDVB_DEBUG_LEVEL ist ein eigener, von g_verbose_logging unabhaengiger
-     * Pegel (normalerweise nur per -L LINUXDVB_DEBUG_LEVEL:10 von Hand gesetzt).
-     * An denselben Schalter gekoppelt, damit ein Diagnose-Log in
-     * linuxdvb_mipsel.c auch ueber das normale serviceapp-Debug-Logging (-g)
-     * erreichbar ist, nicht nur per manuellem -L-Flag. */
-    LINUXDVB_DEBUG_LEVEL = val ? 10 : 0;
+    /* LINUXDVB_DEBUG_LEVEL bewusst NICHT an -g gekoppelt: linuxdvb_printf()
+     * schreibt wie jedes *_printf aus debug.h via log_printf() direkt auf
+     * stderr - exakt denselben Kanal, ueber den exteplayer3 sein JSON-
+     * Steuerprotokoll (E2iSendMsg) an serviceapp sendet. Mit eingeschaltetem
+     * Debug-Logging flutete LinuxDvbOpen()/LinuxDvbPlay() diesen Kanal bei
+     * jedem Start mit Klartext ("v0 a1", "V V_MPEG4/ISO/AVC", ...), der sich
+     * mit den JSON-Zeilen im selben read()-Puffer mischen konnte - fehlende
+     * Tonspuren und Infobar beim Umschalten. Bleibt bei 0, weiterhin nur per
+     * manuellem -L LINUXDVB_DEBUG_LEVEL:10 erreichbar. */
 }
 
 void wma_software_decoder_set(const int32_t val)
