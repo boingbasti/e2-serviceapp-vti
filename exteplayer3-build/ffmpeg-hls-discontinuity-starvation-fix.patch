@@ -222,7 +222,7 @@
      /* If we got a packet, return it */
      if (minplaylist >= 0) {
          struct playlist *pls = c->playlists[minplaylist];
-@@ -2640,7 +2781,48 @@
+@@ -2640,7 +2781,60 @@
          }
  
          ist = pls->ctx->streams[pls->pkt->stream_index];
@@ -241,15 +241,27 @@
 +         * mit wieder "normaler" Reihenfolge (hier: 69s). main_streams[]
 +         * wird ausserdem nur EINMAL pro Index befuellt (siehe update_
 +         * streams_from_subdemuxer oben) und nie neu zugeordnet, wenn ein
-+         * spaeteres Segment eine andere interne Reihenfolge hat. Deshalb
-+         * hier nach codec_type suchen statt blind den Index zu uebernehmen,
-+         * einen bereits aktiven Stream (discard < AVDISCARD_ALL) bevorzugen.
-+         * Gibt es keinen main_stream mit passendem Typ (z.B. Timed-ID3, fuer
-+         * das nie ein eigener Slot angelegt wurde), wird das Paket verworfen
-+         * statt einen typfremden Stream zu verwirren bzw. dessen Codec-Infos
-+         * zu ueberschreiben. */
-+        st = NULL;
-+        {
++         * spaeteres Segment eine andere interne Reihenfolge hat.
++         *
++         * ABER (2026-11-05, Multi-Audio-HLS-Regression): eine reine
++         * Typ-Suche (erster main_stream mit passendem codec_type und
++         * discard < AVDISCARD_ALL) ist falsch, sobald mehrere Tonspuren im
++         * selben Stream gemuxt sind (z.B. IPTV-Kanaele mit 2-3 Sprachen).
++         * Sie fuehrt dann JEDES Audiopaket, unabhaengig vom tatsaechlichen
++         * Subdemuxer-Index, auf denselben ersten aktiven main_stream
++         * zusammen. Weil die Tonspuren unabhaengige, leicht versetzte
++         * Zeitstempel haben, sieht die PTS-Offset-Logik in serviceapp
++         * dadurch staendig rueckwaerts springende DTS, relearnt dauerhaft
++         * und der AV-Delta explodiert (Bild/Ton komplett aus dem Takt).
++         *
++         * Deshalb zuerst die direkte 1:1 Indexzuordnung versuchen (stabil
++         * pro main_streams[]-Slot) und nur bei echtem Typ-Mismatch (der
++         * SSAI-Fall oben) auf die Typ-Suche zurueckfallen. */
++        if (pls->pkt->stream_index < pls->n_main_streams &&
++            pls->main_streams[pls->pkt->stream_index]->codecpar->codec_type == ist->codecpar->codec_type) {
++            st = pls->main_streams[pls->pkt->stream_index];
++        } else {
++            st = NULL;
 +            int j, fallback_idx = -1;
 +            for (j = 0; j < pls->n_main_streams; j++) {
 +                if (pls->main_streams[j]->codecpar->codec_type == ist->codecpar->codec_type) {

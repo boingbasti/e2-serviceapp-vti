@@ -134,7 +134,7 @@ static WriterCaps_t caps_mpegl3 = {
     eAudio,
     "A_MPEG/L3",
     AUDIO_ENCODING_MPEG2,
-    AUDIOTYPE_MP3,
+    AUDIOTYPE_MPEG, /* MP2: einige Decoder spielen es nicht als 0xA (MP3) */
     -1
 };
 

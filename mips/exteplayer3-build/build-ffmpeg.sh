@@ -43,6 +43,8 @@ if [ ! -d "ffmpeg-${FFMPEG_VER}" ]; then
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-skyjet183-upstream-sync.patch"
     echo "=== Appliere DASH-HTTP-Options-Fix (aus dem Wurzel-exteplayer3-build/) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-http-options.patch"
+    echo "=== Appliere DASH-HTTP-Persistent-CDN-Redirect-Patch (aus dem Wurzel-exteplayer3-build/) ==="
+    patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-dash-http-persistent-cdn-redirect.patch"
     echo "=== Appliere HLS-Sequence-Wrap-Resync-Fix (aus dem Wurzel-exteplayer3-build/) ==="
     patch -p1 -d "ffmpeg-${FFMPEG_VER}" < "${BUILDDIR}/../../exteplayer3-build/ffmpeg-hls-sequence-wrap-resync-fix-6.1.1.patch"
     echo "=== Appliere HLS-Discontinuity-Starvation-Fix (aus dem Wurzel-exteplayer3-build/) ==="

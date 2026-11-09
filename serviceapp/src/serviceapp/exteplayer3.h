@@ -14,6 +14,7 @@ struct ExtEplayer3Options
 	bool hlsAudioDefaultOnly;
 	bool debugLoggingEnabled;
 	bool pcmAudioExportEnabled;
+	bool liveSyncEnabled;
 	ExtEplayer3Options():
 		aacSwDecoding(false),
 		dtsSwDecoding(false),
@@ -23,7 +24,8 @@ struct ExtEplayer3Options
 		hlsQualityMode(0),
 		hlsAudioDefaultOnly(false),
 		debugLoggingEnabled(false),
-		pcmAudioExportEnabled(false) {};
+		pcmAudioExportEnabled(false),
+		liveSyncEnabled(false) {};
 };
 
 // Liefert das aktuelle "HLS/DASH start quality"-Setting fuer das

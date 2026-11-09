@@ -2137,8 +2137,9 @@ exteplayer3_set_setting(PyObject *self, PyObject *args)
 	   hart auf false zuruecksetzen. */
 	char debugLoggingParam = -1;
 	char pcmAudioExportParam = -1;
+	char liveSyncParam = -1;
 
-	if (!PyArg_ParseTuple(args, "ibbbbb|ibbb", &settingId, &aacSwDecoding, &dtsSwDecoding, &wmaSwDecoding, &lpcmInjection, &downmix, &hlsQualityMode, &hlsAudioDefaultOnly, &debugLoggingParam, &pcmAudioExportParam))
+	if (!PyArg_ParseTuple(args, "ibbbbb|ibbbb", &settingId, &aacSwDecoding, &dtsSwDecoding, &wmaSwDecoding, &lpcmInjection, &downmix, &hlsQualityMode, &hlsAudioDefaultOnly, &debugLoggingParam, &pcmAudioExportParam, &liveSyncParam))
 		return NULL;
 
 	ExtEplayer3Options *options = NULL;
@@ -2175,6 +2176,8 @@ exteplayer3_set_setting(PyObject *self, PyObject *args)
 			options->debugLoggingEnabled = (debugLoggingParam != 0);
 		if (pcmAudioExportParam != -1)
 			options->pcmAudioExportEnabled = (pcmAudioExportParam != 0);
+		if (liveSyncParam != -1)
+			options->liveSyncEnabled = (liveSyncParam != 0);
 	}
 	return Py_BuildValue("b", ret);
 }
@@ -2280,6 +2283,7 @@ static PyMethodDef serviceappMethods[] = {
 	 " hlsAudioDefaultOnly - optional, (True, False), default False\n"
 	 " debugLoggingEnabled - optional, (True, False), default False\n"
 	 " pcmAudioExportEnabled - optional, (True, False), default False - writes decoded PCM audio to /tmp/exteplayer3_pcm_audio.fifo for third-party plugins, forces software decoding (CPU cost)\n"
+	 " liveSyncEnabled - optional, (True, False), default False - holds the picture briefly at the start of a live stream until enough audio is buffered, against receivers dropping late audio; also keeps watching the buffer during playback\n"
 	},
 	{"serviceapp_set_setting", serviceapp_set_setting, METH_VARARGS,
 	 "set serviceapp settings (setting_id, HLSExplorer, autoSelectStream, connectionSpeedInKb, autoTurnOnSubtitles\n\n"

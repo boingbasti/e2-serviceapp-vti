@@ -64,7 +64,7 @@ License: GPL-2.0
 Homepage: https://github.com/boingbasti/e2-serviceapp-vti
 Architecture: ${ARCH_TAG}
 Depends: gstplayer, libgcc1 (>= 14.2.0), libssl3 (>= 3.3.1), libstdc++6 (>= 14.2.0), enigma2, openssl, libcrypto3 (>= 3.3.1), exteplayer3, libc6 (>= 2.40), uchardet (>= 0.0.8)
-Recommends: exteplayer3 (>= 1:183+vti001)
+Recommends: exteplayer3 (>= 1:185+vti001)
 Source: git://github.com/mx3L/serviceapp.git;branch=master;protocol=https
 EOF
 

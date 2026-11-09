@@ -50,6 +50,7 @@
 extern int ffmpeg_av_dict_set(const char *key, const char *value, int flags);
 extern void       aac_software_decoder_set(const int32_t val);
 extern void  aac_latm_software_decoder_set(const int32_t val);
+extern void        aac_pts_dejitter_set(const int32_t val);
 extern void       dts_software_decoder_set(const int32_t val);
 extern void       wma_software_decoder_set(const int32_t val);
 extern void       ac3_software_decoder_set(const int32_t val);
@@ -532,7 +533,7 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
     int digit_optind = 0;
     int aopt = 0, bopt = 0;
     char *copt = 0, *dopt = 0;
-    while ( (c = getopt(argc, argv, "G:W:H:A:V:U:we3dlsrimvCa:n:x:u:c:h:o:p:P:t:9:0:1:4:5:6:7:f:b:F:S:O:T:L:Q:D:g:K")) != -1)
+    while ( (c = getopt(argc, argv, "G:W:H:A:V:U:we3dlsrimvCa:j:n:x:u:c:h:o:p:P:t:9:0:1:4:5:6:7:f:b:F:S:O:T:L:Q:D:g:KY")) != -1)
     {
         switch (c) 
         {
@@ -558,6 +559,10 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
             aac_latm_software_decoder_set(flag & 0x02);
             break;
         }
+        case 'j':
+            printf("AAC PTS dejitter threshold set to %d ms\n", atoi(optarg));
+            aac_pts_dejitter_set(atoi(optarg));
+            break;
         case 'e':
             printf("Software decoder will be used for EAC3 codec\n");
             eac3_software_decoder_set(1);
@@ -628,6 +633,10 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
             printf("PCM audio export via FIFO enabled\n");
             pcm_audio_export_set(1);
             pcmAudioExportRequested = 1;
+            break;
+        case 'Y':
+            printf("Live-Sync start buffering enabled\n");
+            setenv("EP3_LIVE_SYNC", "1", 1);
             break;
         case 't':
             *pAudioTrackIdx = atoi(optarg);
@@ -809,7 +818,7 @@ int main(int argc, char* argv[])
     int commandRetVal = -1;
 
     /* inform client that we can handle additional commands */
-    E2iSendMsg("{\"EPLAYER3_EXTENDED\":{\"version\":%d}}\n", 183);
+    E2iSendMsg("{\"EPLAYER3_EXTENDED\":{\"version\":%d}}\n", 185);
 
     PlayFiles_t playbackFiles;
     memset(&playbackFiles, 0x00, sizeof(playbackFiles));
@@ -819,6 +828,8 @@ int main(int argc, char* argv[])
         printf("Usage: exteplayer3 filePath [-u user-agent] [-c cookies] [-h headers] [-p prio] [-a] [-d] [-w] [-l] [-s] [-i] [-C] [-T timeout] [-L desc] [-t audioTrackId] [-9 subtitleTrackId] [-x separateAudioUri] plabackUri\n");
         printf("[-b size] Linux DVB output buffer size in MB\n");
         printf("[-a 0|1|2|3] AAC software decoding - 1 bit - AAC ADTS, 2 - bit AAC LATM\n");
+        printf("[-j ms] AAC PTS dejitter threshold in ms, 0 - disabled (default 60)\n");
+        printf("[-Y] Hold the picture at the start of a live stream until audio is buffered\n");
         printf("[-e] EAC3 software decoding\n");
         printf("[-3] AC3 software decoding\n");
         printf("[-d] DTS software decoding\n");

@@ -36,6 +36,8 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Aufnahme von RTSP-/RTMP-Kamerastreams (z. B. IP-Kameras) über ServiceApp, inklusive Fix für eine fälschlich gemeldete „Festplatte voll?"-Meldung
 - Dauerhaftes Standbild bei Live-HLS-Werbeübergängen (Server-Side Ad Insertion) behoben, deutlich robusterer Bild/Ton-Gleichlauf danach
 - Mehrfache Bildparameter (SPS/PPS) aus dem avcC-Header werden jetzt alle übernommen, behebt Klötzchenbildung bei manchen Live-DASH-Diensten
+- Optionale Startverzögerung bei Live-Streams, gegen Hardware-Decoder, die zu spät eintreffenden Ton dauerhaft verwerfen
+- Weniger neue HTTP-Verbindungen bei DASH-Streams: Verbindungen bleiben offen, ein einmal gelernter CDN-Edge-Redirect wird direkt weiterverwendet
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
 

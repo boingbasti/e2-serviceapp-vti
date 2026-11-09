@@ -226,6 +226,7 @@ for key in config_serviceapp.exteplayer3.keys():
         choices=[("auto", _("Auto (first in playlist)")), ("lowest", _("Lowest")), ("highest", _("Highest"))])
     config_serviceapp.exteplayer3[key].hls_audio_default_only = ConfigBoolean(default = True)
     config_serviceapp.exteplayer3[key].pcm_audio_export = ConfigBoolean(default = False)
+    config_serviceapp.exteplayer3[key].live_sync        = ConfigBoolean(default = False)
 
 
 def key_to_setting_id(key):
@@ -302,11 +303,12 @@ def init_serviceapp_settings():
         hls_quality_mode = {"auto": 0, "lowest": 1, "highest": 2}.get(player_cfg.hls_quality_mode.value, 0)
         hls_audio_default_only = player_cfg.hls_audio_default_only.value
         pcm_audio_export = player_cfg.pcm_audio_export.value
+        live_sync        = player_cfg.live_sync.value
 
         serviceapp_client.setExtEplayer3Settings(setting_id, aac_swdecoding,
                 dts_swdecoding, wma_swdecoding, lpcm_injecion, downmix,
                 hls_quality_mode, hls_audio_default_only, debug_logging,
-                pcm_audio_export)
+                pcm_audio_export, live_sync)
 
     if config_serviceapp.servicemp3.player.value == "gstplayer":
         serviceapp_client.setServiceMP3GstPlayer()
@@ -376,6 +378,8 @@ class ServiceAppSettings(ConfigListScreen, Screen):
             exteplayer3_options_cfg.hls_audio_default_only, _("Only keep the DEFAULT=YES audio rendition per HLS audio group, when exteplayer3 parses the master playlist itself.")))
         config_list.append(getConfigListEntry("  " + _("PCM audio export for third-party plugins"),
             exteplayer3_options_cfg.pcm_audio_export, _("Writes decoded PCM audio to /tmp/exteplayer3_pcm_audio.fifo. Forces software decoding for common audio formats.")))
+        config_list.append(getConfigListEntry("  " + _("Live stream start sync"),
+            exteplayer3_options_cfg.live_sync, _("Briefly holds the picture at the start of a live stream until enough audio is buffered, against receivers dropping late-arriving audio permanently. Off by default, zapping is not delayed.")))
         return config_list
 
     def serviceapp_options(self, serviceapp_options_cfg, subtitle_cfg=None):

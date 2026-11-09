@@ -85,6 +85,8 @@ std::vector<std::string> ExtEplayer3::buildCommand()
 	}
 	if (mPlayerOptions.pcmAudioExportEnabled)
 		args.push_back("-K");
+	if (mPlayerOptions.liveSyncEnabled)
+		args.push_back("-Y");
 	return args;
 }
 int ExtEplayer3::start(eMainloop *context)

@@ -268,6 +268,10 @@ static int32_t aac_latm_software_decode = 1;
 static int32_t aac_latm_software_decode = 0;
 #endif
 
+/* Max. erlaubte Differenz (ms) zwischen Stream- und glatt gerechneter
+ * AAC-PTS, 0 = Glaettung aus. Siehe aac_pts_dejitter() weiter unten. */
+static int32_t aac_pts_dejitter_ms = 60;
+
 static int32_t ac3_software_decode = 0;
 static int32_t eac3_software_decode = 0;
 static int32_t dts_software_decode = 0;
@@ -347,6 +351,11 @@ void aac_software_decoder_set(const int32_t val)
 void aac_latm_software_decoder_set(const int32_t val)
 {
     aac_latm_software_decode = val;
+}
+
+void aac_pts_dejitter_set(const int32_t val)
+{
+    aac_pts_dejitter_ms = val > 0 ? val : 0;
 }
 
 void ac3_software_decoder_set(const int32_t val)
@@ -744,6 +753,99 @@ static int64_t calcPts(AVStream *stream, int64_t pts)
     return doCalcPts(stream->time_base, pts);
 }
 
+/* Manche Muxer stempeln AAC-Frames mit einer grob aufgeloesten Uhr, die PES-
+ * PTS schwankt dann um die tatsaechliche Sample-Position (z.B. +-15ms
+ * Saegezahn). Hardware-Decoder machen TSM pro PES und reagieren auf solche
+ * Spruenge mit Luecken/Verwuerfen, hoerbar als periodisches Stottern.
+ * Dagegen wird die PTS der AAC-Frames aus der Anzahl bereits eingespeister
+ * Samples berechnet, die Stream-PTS dient nur noch zur (Re-)Synchronisation.
+ * Portiert aus skyjet18/exteplayer3 v185 (Commit 7e72179). */
+typedef struct
+{
+    int64_t  anchorPts;  // 90 kHz, INVALID_PTS_VALUE = nicht synchronisiert
+    int64_t  samples;    // seit anchorPts eingespeiste Samples
+    int32_t  sampleRate;
+    int32_t  trackId;
+    uint32_t avIdx;
+} AacPtsDejitter_t;
+
+static void aac_pts_dejitter_reset(AacPtsDejitter_t *s)
+{
+    s->anchorPts  = INVALID_PTS_VALUE;
+    s->samples    = 0;
+    s->sampleRate = 0;
+    s->trackId    = -1;
+    s->avIdx      = 0;
+}
+
+static int32_t aac_get_frame_samples(const AVPacket *packet, AVStream *stream, int32_t *sampleRate)
+{
+    static const int32_t adtsSampleRates[] = {96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350};
+    const uint8_t *d = packet->data;
+
+    if (d && packet->size >= 7 && 0xFF == d[0] && 0xF0 == (d[1] & 0xF6))
+    {
+        uint32_t sfi = (d[2] >> 2) & 0x0F;
+        if (sfi < sizeof(adtsSampleRates) / sizeof(adtsSampleRates[0]))
+        {
+            *sampleRate = adtsSampleRates[sfi];
+            return ((d[6] & 0x03) + 1) * 1024;
+        }
+        return 0;
+    }
+
+    *sampleRate = get_codecpar(stream)->sample_rate;
+    if (*sampleRate <= 0)
+    {
+        return 0;
+    }
+
+    if (packet->duration > 0)
+    {
+        return (int32_t)av_rescale_q(packet->duration, stream->time_base, (AVRational){1, *sampleRate});
+    }
+
+    return get_codecpar(stream)->frame_size > 0 ? get_codecpar(stream)->frame_size : 0;
+}
+
+static int64_t aac_pts_dejitter(AacPtsDejitter_t *s, const AVPacket *packet, AVStream *stream, int32_t trackId, uint32_t avIdx, int64_t pts)
+{
+    int32_t sampleRate = 0;
+    int32_t frameSamples = 0;
+
+    if (pts == INVALID_PTS_VALUE || 0 == aac_pts_dejitter_ms ||
+        (frameSamples = aac_get_frame_samples(packet, stream, &sampleRate)) <= 0)
+    {
+        aac_pts_dejitter_reset(s);
+        return pts;
+    }
+
+    if (s->anchorPts != INVALID_PTS_VALUE && s->sampleRate == sampleRate &&
+        s->trackId == trackId && s->avIdx == avIdx)
+    {
+        int64_t expected = (s->anchorPts + av_rescale(s->samples, 90000, sampleRate)) & 0x1FFFFFFFFLL;
+        /* Differenz mit Behandlung des 33-Bit-PTS-Ueberlaufs */
+        int64_t diff = ((pts - expected + 0x100000000LL) & 0x1FFFFFFFFLL) - 0x100000000LL;
+        int64_t absDiff = diff < 0 ? -diff : diff;
+
+        if (absDiff <= (int64_t)aac_pts_dejitter_ms * 90)
+        {
+            ffmpeg_printf(200, "AAC PTS %"PRId64" -> %"PRId64" (diff %"PRId64")\n", pts, expected, diff);
+            s->samples += frameSamples;
+            return expected;
+        }
+
+        ffmpeg_printf(10, "AAC PTS resync, diff %"PRId64" ms\n", diff / 90);
+    }
+
+    s->anchorPts  = pts;
+    s->samples    = frameSamples;
+    s->sampleRate = sampleRate;
+    s->trackId    = trackId;
+    s->avIdx      = avIdx;
+    return pts;
+}
+
 static int64_t applyPtsOffset(int64_t rawPts, int64_t offset)
 {
     if (rawPts == INVALID_PTS_VALUE)
@@ -816,6 +918,34 @@ static int64_t knownGoodAVDelta = 0; /* erwartete audioPts - videoPts Differenz 
  * schnell genug, um eine binnen Sekunden verstummende Spur (stummer
  * Werbespot) nicht mehr als "frisch" durchgehen zu lassen. */
 #define OTHER_TRACK_FRESHNESS_US (700LL * 1000LL)
+
+/* Folgenuebergang bei Server-Side Ad Insertion (SSAI, ca. 1,12s Bild/Ton-
+ * Versatz nach mehrstuendigem Dauerlauf beobachtet): otherTrackFresh prueft
+ * nur, ob die GEGENSPUR kuerzlich Pakete lieferte, nicht aber, ob die
+ * EIGENE Spur selbst gerade durchgehend lief. Bei einem Discontinuity-
+ * Sprung (getrennte Audio/Video-Renditions, Segment-Downloads laufen leicht
+ * versetzt ab, z.B. 1s Differenz) hatte Video seine alte Historie keine
+ * Sekunde unterbrochen, durfte wegen otherTrackFresh aber trotzdem auf
+ * Audios bereits in die neue Folge vorgelaufene Position cross-ankern --
+ * der alte, bis dahin exakt synchrone AV-Versatz ging verloren. Schwelle
+ * deutlich ueber dem normalen Segment-Download-Versatz (hier ~1s), aber
+ * weit unter einem echten Rebuffering/Standbild (siehe
+ * AV_DELTA_FREEZE_GAP_SECONDS, 15s). */
+#define TRACK_STALL_THRESHOLD_US (2LL * 1000000LL)
+
+/* Server-seitiger Encoder-Bug (bei einem gemeldeten IPTV-Sender
+ * beobachtet): manche IPTV-Feeds liefern Audio und Video auf komplett unterschiedlichen
+ * PTS-Epochen (hier per ffprobe am Rohsegment bestaetigt: Audio startet bei
+ * ca. 48,0h, Video bei ca. 21,6h -- 26,48h Versatz, waehrend die direkt
+ * benachbarte Variante desselben Anbieters nur ~9,6ms Versatz hat). Der
+ * sessionBasePts-Mechanismus unten uebernimmt einen solchen Versatz
+ * unveraendert 1:1 in die korrigierte PTS -- die Broadcom-Hardware wartet
+ * dann auf eine STC-Zeit, die nie (oder erst viele Stunden spaeter)
+ * erreicht wird, Ton bleibt stumm, obwohl die Audiodaten im Stream
+ * vorhanden sind. Eine Differenz in dieser Groessenordnung ist fuer
+ * echten, im Container gewollten A/V-Versatz (siehe
+ * AV_DELTA_PLAUSIBLE_LIMIT, 500ms) niemals plausibel. */
+#define PTS_EPOCH_MISMATCH_THRESHOLD (5LL * 90000LL) /* 5s */
 
 /* Diagnose (2026-07-26): misst den TATSAECHLICHEN Verlauf von knownGoodAVDelta
  * direkt, statt ihn nur indirekt aus Offset-Werten verschiedener Relearn-
@@ -1331,12 +1461,27 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                 cache[i].lastRelearnMonoUs = nowUs;
                 bool relearnStorm = (cache[i].recentRelearnCount > RELEARN_STORM_THRESHOLD);
 
-                /* otherTrackFresh entscheidet im Normalfall, ob target der
-                 * Gegenspur folgt (cross) oder nur der eigenen Historie (own)
-                 * -- trusted spiegelt exakt das wider, damit ein spaeterer
-                 * Cross-Anchor der Gegenspur bzw. ein knownGoodAVDelta-Update
-                 * nicht auf einem rein selbstreferenziellen Offset aufbaut. */
-                bool useCrossAnchor = otherTrackFresh && !relearnStorm;
+                /* otherTrackFresh entscheidet, ob target der Gegenspur folgt
+                 * (cross) oder nur der eigenen Historie (own) -- trusted
+                 * spiegelt exakt das wider, damit ein spaeterer Cross-Anchor
+                 * der Gegenspur bzw. ein knownGoodAVDelta-Update nicht auf
+                 * einem rein selbstreferenziellen Offset aufbaut. Zusaetzlich
+                 * darf die eigene Spur nur dann auf die Gegenspur aufspringen,
+                 * wenn sie selbst wirklich gestanden hat (ownTrackStalled,
+                 * siehe TRACK_STALL_THRESHOLD_US) -- lief sie gerade noch
+                 * durchgehend, bleibt ihre eigene, bis dahin synchrone
+                 * Historie der verlaesslichere Anker (Folgenuebergang mit
+                 * asymmetrischer Segment-Download-Verzoegerung). Eine
+                 * zusaetzliche otherTrackTrusted-Huerde (kurz versucht,
+                 * 2026-11-06) verhinderte dagegen nach einem echten
+                 * mehrsekuendigen Stillstand gerade das schnelle gegenseitige
+                 * Einrasten beider Spuren aufeinander (beobachtet: zwei Cross-
+                 * Anchor-Relearns binnen 1s konvergieren von selbst auf einen
+                 * ~200ms-Rest) und sorgte stattdessen fuer einen harten,
+                 * mehrsekuendigen Versatz -- deshalb wieder entfernt. */
+                bool ownTrackStalled = (*lastGoodPts < 0) ||
+                        ((nowUs - *monoUsAtLastGoodPts) >= TRACK_STALL_THRESHOLD_US);
+                bool useCrossAnchor = otherTrackFresh && !relearnStorm && ownTrackStalled;
                 int64_t target = useCrossAnchor ? crossTarget : *lastGoodPts;
                 int64_t newOffset = rawPts - target;
                 cache[i].offset = newOffset;
@@ -1403,6 +1548,7 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
     }
 
     int64_t offset;
+    bool usedCrossAnchorForNewSlot = otherTrackFresh;
     if (isAudio && g_audioSwitchInheritOffset && g_haveLastAudioOffset && *lastGoodPts >= 0)
     {
         offset = g_lastAudioOffsetUsed;
@@ -1410,7 +1556,13 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
     }
     else if (*lastGoodPts >= 0)
     {
-        int64_t target = otherTrackFresh ? crossTarget : *lastGoodPts;
+        /* Gleiche Absicherung wie oben im Relearn-Zweig (siehe
+         * TRACK_STALL_THRESHOLD_US-Kommentar): neuer Stream-Pointer (z.B.
+         * Renditionwechsel), aber die eigene Rolle hat bereits eine
+         * Historie -- nur bei echtem eigenem Stillstand cross-ankern. */
+        bool ownTrackStalled = (nowUs - *monoUsAtLastGoodPts) >= TRACK_STALL_THRESHOLD_US;
+        usedCrossAnchorForNewSlot = otherTrackFresh && ownTrackStalled;
+        int64_t target = usedCrossAnchorForNewSlot ? crossTarget : *lastGoodPts;
         offset = rawPts - target;
     }
     else
@@ -1437,21 +1589,48 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
          * eigenen rohen PTS, danach ziehen BEIDE Spuren bei ihrem jeweils
          * ersten Lernen denselben gemeinsamen Nullpunkt ab -- der natuerliche
          * A/V-Versatz bleibt dabei erhalten, nur die absolute Position
-         * startet nahe 0 statt bei einem verwirrenden Fantasiewert. */
+         * startet nahe 0 statt bei einem verwirrenden Fantasiewert.
+         *
+         * Ausnahme (siehe PTS_EPOCH_MISMATCH_THRESHOLD oben): liegt die
+         * eigene rohe PTS mehr als 5s von sessionBasePts entfernt, handelt
+         * es sich nicht um einen "natuerlichen" A/V-Versatz, sondern um
+         * einen kaputten Encoder, der dieser Spur eine komplett andere
+         * Zeitepoche gibt. In diesem Fall bekommt die Spur statt des
+         * gemeinsamen Nullpunkts ihren EIGENEN rohen PTS als Referenz --
+         * genau wie die allererste Spur der Session (siehe oben). Ein
+         * Ankoppeln an otherTrackLastGoodPts (so der erste Versuch, 2026-11-07)
+         * waere falsch: das ist keine feste Position, sondern der bereits
+         * gelaufene Stand der Gegenspur zum Zeitpunkt des Ankommens dieser
+         * Spur -- bei HLS laeuft die zuerst gestartete Spur durchs
+         * Segment-Vorab-Puffern oft schon mehrere Sekunden voraus, bevor die
+         * zweite Spur ueberhaupt ihr erstes Paket bekommt (beobachtet:
+         * 14s Versatz bei 4s/6s-Segmenten und 3 vorgepufferten Segmenten),
+         * wodurch die zweite Spur genau um diesen Vorlauf verzoegert
+         * startete, statt synchron bei 0. */
         if (sessionBasePts && *sessionBasePts < 0)
         {
             *sessionBasePts = rawPts;
         }
-        offset = sessionBasePts ? *sessionBasePts : 0;
+        int64_t base = sessionBasePts ? *sessionBasePts : 0;
+        if (llabs(rawPts - base) > PTS_EPOCH_MISMATCH_THRESHOLD)
+        {
+            offset = rawPts;
+        }
+        else
+        {
+            offset = base;
+        }
     }
     int slot = *nextSlot;
     cache[slot].streamPtr = streamPtr;
     cache[slot].offset = offset;
     cache[slot].learned = 1;
-    /* otherTrackFresh bestimmt oben in beiden Zweigen (target=crossTarget
-     * bzw. offset=rawPts-crossTarget) einheitlich, ob cross oder own/0
-     * verwendet wurde -- siehe Kommentar an PtsOffsetCacheEntry_t.trusted. */
-    cache[slot].trusted = otherTrackFresh;
+    /* usedCrossAnchorForNewSlot spiegelt wider, ob oben tatsaechlich
+     * cross oder own/0 verwendet wurde -- siehe Kommentar an
+     * PtsOffsetCacheEntry_t.trusted. Im *lastGoodPts>=0-Zweig entspricht das
+     * seit TRACK_STALL_THRESHOLD_US nicht mehr nur otherTrackFresh (siehe
+     * dort), in den beiden anderen Zweigen unveraendert otherTrackFresh. */
+    cache[slot].trusted = usedCrossAnchorForNewSlot;
     /* Dieser Ring-Buffer-Slot kann einen alten, voellig unrelated
      * Stream-Pointer wiederverwenden -- dessen Kaskaden-Zaehler (siehe
      * PtsOffsetCacheEntry_t.recentRelearnCount) darf hier nicht nachwirken. */
@@ -1721,11 +1900,146 @@ static void checkStreamMetadataUpdate(AVFormatContext *avContext)
     }
 }
 
+/* Live-Sync-Start-Pufferhalt (portiert aus skyjet18/exteplayer3 v185,
+ * urspruenglich von Blacker91s exteplayer3-dreamos-Fork fuer Dreambox: bei
+ * Live-TS z.B. Tvheadend kann Ton dem Bild anfangs >1s hinterherhinken,
+ * manche Hardware-Decoder verwerfen ihn dann dauerhaft als "zu spaet").
+ * Haelt die Bildausgabe beim Start kurz an, bis genug Ton gepuffert ist, und
+ * beobachtet den Tonpuffer danach weiter. Bewusst als Opt-in portiert
+ * (anders als upstream Default-an): EP3_LIVE_SYNC=1 aktiviert es (per
+ * CLI-Flag -Y oder direkt per Umgebungsvariable), ohne das bleibt das
+ * bisherige Zapping-Verhalten unveraendert. */
+static volatile int     ls_state  = 0;   /* 0 noch nicht gestartet, 1 haelt, 2 fertig/aus */
+static volatile int64_t ls_last_v = INVALID_PTS_VALUE;
+static volatile int64_t ls_last_a = INVALID_PTS_VALUE;
+
+static int64_t ls_now_ms(void)
+{
+    /* clock_gettime() direkt vermeiden (siehe Kommentar weiter unten bei
+     * nowUsForGapCheck/av_gettime_relative(): der rohe glibc-Compat-Syscall
+     * schreibt auf dieser Architektur nur den alten 8-Byte-timespec, die
+     * oberen 4 Byte von tv_sec werden mit den Nanosekunden ueberschrieben). */
+    return av_gettime_relative() / 1000;
+}
+
+static void *ls_thread(void *arg)
+{
+    Context_t *context = (Context_t *)arg;
+    int64_t t0 = ls_now_ms(), maxgap = 0, need = -1;
+    const char *menv = getenv("EP3_LIVE_SYNC_MARGIN");
+    int64_t margin = menv ? atoi(menv) : 400;
+    while (ls_state == 1 && context->playback && context->playback->isPlaying)
+    {
+        int64_t el = ls_now_ms() - t0;
+        need = -1;
+        if (ls_last_v != INVALID_PTS_VALUE && ls_last_a != INVALID_PTS_VALUE)
+        {
+            int64_t gap = (ls_last_v - ls_last_a) / 90;
+            if (gap > maxgap) maxgap = gap;
+            need = maxgap > 200 ? maxgap + margin : 0;
+            if (need > 3000) need = 3000;
+        }
+        else if (el >= 2000)
+            need = 0;                     /* kein Ton gesehen: Bild nicht aufhalten */
+        if ((need >= 0 && el >= need) || el >= 3500)
+            break;
+        usleep(50000);
+    }
+    if (ls_state == 1)
+    {
+        ls_state = 2;
+        if (context->playback && context->playback->isPlaying && !context->playback->isPaused)
+            context->output->Command(context, OUTPUT_CONTINUE, NULL);
+        printf("{\"log\":\"live sync: audio gap %lld ms, held %lld ms\"}\n", (long long)maxgap, (long long)(ls_now_ms() - t0));
+        fflush(stdout);
+    }
+    else
+        return NULL;
+
+    /* Puffer danach weiter beobachten: faellt der im Decoder gepufferte Ton
+     * aus (kaeme nach seiner Praesentationszeit und wuerde fuer den Rest des
+     * Kanals verworfen), Bild kurz anhalten bis wieder genug Ton da ist.
+     * EP3_LIVE_SYNC_WATCH=0 deaktiviert das. */
+    const char *env = getenv("EP3_LIVE_SYNC_WATCH");
+    if (env && env[0] == '0')
+        return NULL;
+    int low = 0;
+    int64_t last_resync = 0;
+    while (context->playback && context->playback->isPlaying)
+    {
+        usleep(250000);
+        if (context->playback->isPaused || ls_last_a == INVALID_PTS_VALUE)
+        {
+            low = 0;
+            continue;
+        }
+        unsigned long long int cur = 0;
+        if (context->output->Command(context, OUTPUT_PTS, &cur) != 0 || cur == 0)
+            continue;
+        int64_t d = ((int64_t)ls_last_a - (int64_t)cur) & 0x1FFFFFFFFLL;
+        if (d >= 0x100000000LL)
+            d -= 0x200000000LL;
+        int64_t slack = d / 90;
+        if (slack < -10000 || slack > 30000)    /* Diskontinuitaet, kein Pufferstand */
+        {
+            low = 0;
+            continue;
+        }
+        low = slack < 150 ? low + 1 : 0;
+        if (low < 2 || ls_now_ms() - last_resync < 5000)
+            continue;
+        /* bis ca. 1s Ton-Vorlauf vor dem Bild anhalten */
+        int64_t t1 = ls_now_ms();
+        context->output->Command(context, OUTPUT_PAUSE, NULL);
+        while (context->playback && context->playback->isPlaying && !context->playback->isPaused &&
+               ls_now_ms() - t1 < 3000)
+        {
+            int64_t dd = ((int64_t)ls_last_a - (int64_t)cur) & 0x1FFFFFFFFLL;
+            if (dd >= 0x100000000LL)
+                dd -= 0x200000000LL;
+            if (dd / 90 >= 1000)
+                break;
+            usleep(50000);
+        }
+        if (context->playback && context->playback->isPlaying && !context->playback->isPaused)
+            context->output->Command(context, OUTPUT_CONTINUE, NULL);
+        last_resync = ls_now_ms();
+        low = 0;
+        printf("{\"log\":\"live sync: audio ran out (%lld ms), held %lld ms\"}\n", (long long)slack, (long long)(last_resync - t1));
+        fflush(stdout);
+    }
+    return NULL;
+}
+
+static void ls_on_video(Context_t *context, int64_t pts)
+{
+    if (pts != INVALID_PTS_VALUE) ls_last_v = pts;
+    if (ls_state != 0) return;
+    const char *env = getenv("EP3_LIVE_SYNC");
+    if (!(env && env[0] == '1') || !avContextTab[0] ||
+        (avContextTab[0]->duration != AV_NOPTS_VALUE && avContextTab[0]->duration > 0))
+    {
+        ls_state = 2;
+        return;
+    }
+    ls_state = 1;
+    context->output->Command(context, OUTPUT_PAUSE, NULL);
+    pthread_t th;
+    pthread_attr_t at; pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, ls_thread, context) != 0)
+    {
+        ls_state = 2;
+        context->output->Command(context, OUTPUT_CONTINUE, NULL);
+    }
+    pthread_attr_destroy(&at);
+}
+
 /* **************************** */
 /* Worker Thread                */
 /* **************************** */
 
-static void FFMPEGThread(Context_t *context) 
+static void FFMPEGThread(Context_t *context)
 {
     char threadname[17];
     strncpy(threadname, __func__, sizeof(threadname));
@@ -1820,7 +2134,10 @@ static void FFMPEGThread(Context_t *context)
     int64_t totalPacketCounter = 0;
 
     int64_t multiContextLastPts[IPTV_AV_CONTEXT_MAX_NUM] = {INVALID_PTS_VALUE, INVALID_PTS_VALUE};
-    
+
+    AacPtsDejitter_t aacPtsDejitter;
+    aac_pts_dejitter_reset(&aacPtsDejitter);
+
     int64_t showtime = 0;
     int64_t bofcount = 0;
     int32_t       err = 0;
@@ -2099,6 +2416,7 @@ static void FFMPEGThread(Context_t *context)
             currentVideoPts = -1;
             currentAudioPts = -1;
             latestPts = 0;
+            aac_pts_dejitter_reset(&aacPtsDejitter);
 
             // flush streams
             uint32_t i = 0;
@@ -2606,6 +2924,7 @@ static void FFMPEGThread(Context_t *context)
                      * ueberspringen als mit Fantasie-PTS schreiben. */
                     if (pts != INVALID_PTS_VALUE)
                     {
+                        ls_on_video(context, pts);
                         if (Write(context->output->video->Write, context, &avOut, pts) < 0)
                         {
                             ffmpeg_err("writing data to video device failed\n");
@@ -2639,6 +2958,7 @@ static void FFMPEGThread(Context_t *context)
                          * cachen/dts-Lookup versorgen, das eigentliche Lernen
                          * erst mit dem dekodierten Wert. */
                         (use_custom_io[cAVIdx] != 0) || (audioTrack->inject_as_pcm == 1));
+                if (currentAudioPts != INVALID_PTS_VALUE) ls_last_a = currentAudioPts;
                 dts = lookupCachedPtsOffset(
                         audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
                         calcPts(pktStream, packet.dts));
@@ -2678,7 +2998,14 @@ static void FFMPEGThread(Context_t *context)
                     releaseMutex(__FILE__, __FUNCTION__,__LINE__);
                     continue;
                 }
-                
+
+                if (audioTrack->inject_raw_pcm != 1 && audioTrack->inject_as_pcm != 1 &&
+                    (get_codecpar(audioTrack->stream)->codec_id == AV_CODEC_ID_AAC ||
+                     get_codecpar(audioTrack->stream)->codec_id == AV_CODEC_ID_AAC_LATM))
+                {
+                    pts = aac_pts_dejitter(&aacPtsDejitter, &packet, audioTrack->stream, audioTrack->Id, cAVIdx, pts);
+                }
+
                 pcmPrivateData_t pcmExtradata;
 #if HAVE_CH_LAYOUT
                 pcmExtradata.channels              = get_codecpar(audioTrack->stream)->ch_layout.nb_channels;
@@ -2972,6 +3299,7 @@ static void FFMPEGThread(Context_t *context)
                                 &lastGoodAudioPtsTrusted,
                                 &sessionBasePts,
                                 use_custom_io[cAVIdx] != 0);
+                        if (currentAudioPts != INVALID_PTS_VALUE) ls_last_a = currentAudioPts;
                         out_samples = swr_convert(swr, &output[0], out_samples, (const uint8_t **) &decoded_frame->data[0], in_samples);
                         
                         //////////////////////////////////////////////////////////////////////
@@ -3727,6 +4055,23 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
 
         if( strncmp(filename, "http://127.0.0.1", 16) == 0 )
         {
+            /* Header, die ArchivCZSK selbst per -h uebergibt, enden nicht
+             * zwingend auf CRLF (ServiceApp selbst haengt beim Bauen des
+             * -h-Strings immer \r\n an, ArchivCZSK ruft exteplayer3 hier
+             * aber direkt auf, an ServiceApp vorbei). Ohne Trenner verklebt
+             * der folgende AV_DICT_APPEND den neuen Header mit dem letzten
+             * vorhandenen zu einer einzigen kaputten Zeile, wodurch
+             * ArchivCZSK bestimmte Inhalte danach nicht mehr abspielen
+             * konnte (Upstream-PR skyjet18/exteplayer3#2). */
+            AVDictionaryEntry *hdr = av_dict_get(avio_opts, "headers", NULL, 0);
+            if (hdr && hdr->value && hdr->value[0])
+            {
+                size_t hlen = strlen(hdr->value);
+                if (hlen < 2 || hdr->value[hlen - 2] != '\r' || hdr->value[hlen - 1] != '\n')
+                {
+                    av_dict_set(&avio_opts, "headers", "\r\n", AV_DICT_APPEND);
+                }
+            }
             /* when using with ArchivCZSK, then indicate DRM support */
             av_dict_set(&avio_opts, "headers", "X-DRM-Api-Level: 1\r\n", AV_DICT_APPEND);
         }

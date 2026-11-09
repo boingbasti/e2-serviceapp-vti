@@ -83,16 +83,19 @@ def setServiceAppSettings(settingId, HLSExplorer, autoSelectStream, connectionSp
 def setGstreamerPlayerSettings(settingId, videoSink, audioSink, subtitleEnabled, bufferSize, bufferDuration):
 	return serviceapp.gstplayer_set_setting(settingId, videoSink, audioSink, subtitleEnabled, bufferSize, bufferDuration)
 
-def setExtEplayer3Settings(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode=0, hlsAudioDefaultOnly=False, debugLoggingEnabled=None, pcmAudioExportEnabled=None):
-	# Gleicher Sentinel-Gedanke wie oben. pcmAudioExportEnabled kann in der
-	# C-Varargs-Reihenfolge nur mitgegeben werden, wenn debugLoggingEnabled auch
-	# mitgegeben wird - fehlt es, wird es aus dem aktuellen Setting nachgezogen,
-	# damit es nicht ungewollt auf False faellt.
+def setExtEplayer3Settings(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode=0, hlsAudioDefaultOnly=False, debugLoggingEnabled=None, pcmAudioExportEnabled=None, liveSyncEnabled=None):
+	# Gleicher Sentinel-Gedanke wie oben. pcmAudioExportEnabled/liveSyncEnabled
+	# koennen in der C-Varargs-Reihenfolge nur mitgegeben werden, wenn alle
+	# vorherigen optionalen Parameter auch mitgegeben wurden - fehlen sie,
+	# werden sie aus dem aktuellen Setting nachgezogen, damit sie nicht
+	# ungewollt auf False fallen.
 	extra = []
 	if debugLoggingEnabled is not None:
 		extra.append(debugLoggingEnabled)
 		if pcmAudioExportEnabled is not None:
 			extra.append(pcmAudioExportEnabled)
+			if liveSyncEnabled is not None:
+				extra.append(liveSyncEnabled)
 	elif pcmAudioExportEnabled is not None:
 		from Components.config import config
 		try:
@@ -100,6 +103,8 @@ def setExtEplayer3Settings(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecodin
 		except Exception:
 			dl = False
 		extra.extend([dl, pcmAudioExportEnabled])
+		if liveSyncEnabled is not None:
+			extra.append(liveSyncEnabled)
 
 	return serviceapp.exteplayer3_set_setting(settingId, aacSwDecoding, dtsSwDecoding, wmaSwDecoding, lpcmInjection, downmix, hlsQualityMode, hlsAudioDefaultOnly, *extra)
 
