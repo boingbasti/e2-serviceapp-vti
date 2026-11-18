@@ -38,6 +38,8 @@ Details zu Lizenzen und übernommenen/eigenen Anteilen je Komponente stehen in [
 - Mehrfache Bildparameter (SPS/PPS) aus dem avcC-Header werden jetzt alle übernommen, behebt Klötzchenbildung bei manchen Live-DASH-Diensten
 - Optionale Startverzögerung bei Live-Streams, gegen Hardware-Decoder, die zu spät eintreffenden Ton dauerhaft verwerfen
 - Weniger neue HTTP-Verbindungen bei DASH-Streams: Verbindungen bleiben offen, ein einmal gelernter CDN-Edge-Redirect wird direkt weiterverwendet
+- Neue Einstellung: korrekter Sendername statt Sendungstitel bei IPTV-Sendern (5001/5002) mit EPG-Daten, optional aktivierbar
+- Mehrere Stabilitätsfixes aus dem exteplayer3-Originalprojekt übernommen: Absturzschutz bei beschädigten H.264/H.265-Streams, Untertitel-Crash und -Speicherleck behoben, kein Zombie-Prozess mehr nach einem Enigma2-Absturz während der Wiedergabe
 
 Vollständige Liste aller Fixes mit technischem Hintergrund: [CHANGELOG.md](CHANGELOG.md).
 
