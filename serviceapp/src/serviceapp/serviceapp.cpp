@@ -9,6 +9,8 @@
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
+#include <list>
 #include <unistd.h>
 #include <strings.h>
 #include <endian.h>
@@ -75,6 +77,15 @@ bool g_debugLoggingEnabled = false;
    seit Monaten aktiv, niemand soll es stillschweigend verlieren), ueber
    "Probe recording length (ffprobe)" im Setup abschaltbar. */
 bool g_probeMovieLengthEnabled = true;
+
+/* Steuert die "VTi ServiceName.py workaround"-Suppression in
+   eStaticServiceAppInfo::getEvent() (siehe dort). Default aus: am bisherigen
+   Verhalten soll sich fuer User, die den VTi-eigenen Anzeigefehler
+   (Sendername wird bei EPG-Streams durch den Sendungstitel ersetzt) nicht
+   bemerken oder nicht stoert, ungefragt nichts aendern. Ueber die Setup-
+   Option "Korrekten Sendernamen bei EPG-Streams anzeigen" bewusst
+   aktivierbar. */
+bool g_ServiceNameWorkaroundEnabled = false;
 
 /* Same problem for eDebugImpl(int flags, const char*, ...), the actual logging
    function behind the eDebug()/eLog() macros: not exported by the real enigma2
@@ -153,6 +164,34 @@ static eServiceAppOptions g_ServiceAppOptionsUser;
 
 static const std::string gReplaceServiceMP3Path = eEnv::resolve("$sysconfdir/enigma2/serviceapp_replaceservicemp3");
 static const bool gReplaceServiceMP3 = ( access( gReplaceServiceMP3Path.c_str(), F_OK ) != -1 );
+
+// Workaround fuer einen VTi-eigenen Anzeigefehler (Components/Converter/ServiceName.py):
+// VTi nimmt an, jeder Service mit gesetztem Pfad, fuer den die statische getEvent()-
+// Abfrage ein EPG-Event liefert, muesse eine Aufnahme von der Festplatte sein, und
+// ersetzt dann in Infobar/Display den Sendernamen durch den Sendungstitel. Seit dem
+// eigenen EPG-Piggyback-Feature fuer Streams (eStaticServiceAppInfo::getEvent weiter
+// unten) trifft das faelschlicherweise auch auf aktiv laufende 5002-Streams zu.
+// s_active_services haelt die Referenzen aller aktuell aktiv spielenden eServiceApp-
+// Instanzen; die statische "Jetzt"-Abfrage (start_time==-1) liefert fuer genau diese
+// Referenzen kein Event, wodurch VTis Fehlannahme nicht mehr greift. Die eigentliche
+// Live-Now/Next-Anzeige (eServiceApp::getEvent) sowie jede EPG-Abfrage fuer andere
+// Kanaele oder mit einem konkreten Zeitpunkt (start_time>0, z.B. Timer-Pruefungen)
+// bleiben davon unberuehrt.
+static pthread_mutex_t s_active_services_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::list<eServiceReference> s_active_services;
+
+// Vergleicht zwei Referenzen anhand Typ, DVB-Feldern (sid/tsid/onid/namespace) und
+// dekodiertem Pfad - ein reiner String-/operator==-Vergleich waere nicht robust
+// genug, falls der Pfad an einer Stelle noch "%3a"-kodiert und an anderer bereits
+// dekodiert vorliegt.
+static bool activeServiceRefMatches(const eServiceReference &a, const eServiceReference &b)
+{
+	if (a.type != b.type)
+		return false;
+	if (memcmp(a.data, b.data, sizeof(int) * 8) != 0)
+		return false;
+	return Url(a.path).url() == Url(b.path).url();
+}
 
 static bool isM2TSService(const eServiceReference& ref)
 {
@@ -398,6 +437,11 @@ eServiceApp::eServiceApp(eServiceReference ref):
 	SALOG("ctor: before gotPlayerMessage connect");
 	player->gotPlayerMessage = [this](int msg) { gotExtPlayerMessage(msg); };
 	m_has_event_slot = false;
+
+	pthread_mutex_lock(&s_active_services_mutex);
+	s_active_services.push_back(m_ref);
+	pthread_mutex_unlock(&s_active_services_mutex);
+
 	SALOG("ctor: DONE");
 };
 
@@ -441,6 +485,18 @@ eServiceApp::~eServiceApp()
 	}
 #endif
 	g_useUserSettings = false;
+
+	pthread_mutex_lock(&s_active_services_mutex);
+	for (std::list<eServiceReference>::iterator it = s_active_services.begin(); it != s_active_services.end(); ++it)
+	{
+		if (activeServiceRefMatches(*it, m_ref))
+		{
+			s_active_services.erase(it);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&s_active_services_mutex);
+
 	SALOG("~eServiceApp: done");
 };
 
@@ -1935,6 +1991,31 @@ long long eStaticServiceAppInfo::getFileSize(const eServiceReference &ref)
 RESULT eStaticServiceAppInfo::getEvent(const eServiceReference &ref, ePtr<eServiceEvent> &evt, time_t start_time)
 {
 #ifdef HAVE_EPG
+	// VTi-Workaround (siehe Kommentar bei s_active_services oben): die "Jetzt"-Abfrage
+	// (start_time==-1) liefert fuer den aktuell aktiv laufenden Stream kein Event, damit
+	// VTis ServiceName.py den Sendernamen nicht faelschlich durch den Sendungstitel
+	// ersetzt. Gezielte Zeitpunktabfragen und alle anderen Kanaele bleiben unberuehrt.
+	// Per Setup-Option abschaltbar (default aus, siehe g_ServiceNameWorkaroundEnabled).
+	if (g_ServiceNameWorkaroundEnabled && start_time == -1)
+	{
+		bool isActive = false;
+		pthread_mutex_lock(&s_active_services_mutex);
+		for (std::list<eServiceReference>::const_iterator it = s_active_services.begin(); it != s_active_services.end(); ++it)
+		{
+			if (activeServiceRefMatches(*it, ref))
+			{
+				isActive = true;
+				break;
+			}
+		}
+		pthread_mutex_unlock(&s_active_services_mutex);
+		if (isActive)
+		{
+			SALOG("eStaticServiceAppInfo::getEvent - suppressed for actively playing ref=%s (VTi ServiceName.py workaround)", ref.toString().c_str());
+			evt = 0;
+			return -1;
+		}
+	}
 	SALOG("eStaticServiceAppInfo::getEvent - ref=%s data0=%d start_time=%ld", ref.toString().c_str(), ref.getData(0), (long)start_time);
 	if (Url(ref.path).url().find("://") != std::string::npos)
 	{
@@ -2202,8 +2283,9 @@ serviceapp_set_setting(PyObject *self, PyObject *args)
 	   Parameters duerfen das Logging nicht mehr ungewollt abschalten). */
 	char debugLoggingParam = -1;
 	char probeMovieLengthParam = -1;
+	char servicenameWorkaroundParam = -1;
 
-	if (!PyArg_ParseTuple(args, "ibbIib|bb", &settingId, &HLSExplorer, &autoSelectStream, &connectionSpeedInKb, &autoTurnOnSubtitles, &HLSAudioFilter, &debugLoggingParam, &probeMovieLengthParam))
+	if (!PyArg_ParseTuple(args, "ibbIib|bbb", &settingId, &HLSExplorer, &autoSelectStream, &connectionSpeedInKb, &autoTurnOnSubtitles, &HLSAudioFilter, &debugLoggingParam, &probeMovieLengthParam, &servicenameWorkaroundParam))
 		return NULL;
 
 	/* Process-wide, not per-options-struct: applies regardless of which settingId
@@ -2216,6 +2298,8 @@ serviceapp_set_setting(PyObject *self, PyObject *args)
 	}
 	if (probeMovieLengthParam != -1)
 		g_probeMovieLengthEnabled = (probeMovieLengthParam != 0);
+	if (servicenameWorkaroundParam != -1)
+		g_ServiceNameWorkaroundEnabled = (servicenameWorkaroundParam != 0);
 
 	eServiceAppOptions *options = NULL;
 	switch (settingId)
@@ -2294,6 +2378,7 @@ static PyMethodDef serviceappMethods[] = {
 	 " autoTurnOnSubtitles - auto turn on subtitles if available (0=Off, 1=Forced only, 2=All; True/False bleiben als 1/0 kompatibel)\n"
 	 " debugLoggingEnabled - optional, (True, False), default False (process-wide, not per setting_id)\n"
 	 " probeMovieLengthEnabled - optional, (True, False), default True (process-wide, not per setting_id) - requires debugLoggingEnabled to be passed too (varargs order)\n"
+	 " servicenameWorkaroundEnabled - optional, (True, False), default False (process-wide, not per setting_id) - requires debugLoggingEnabled and probeMovieLengthEnabled to be passed too (varargs order); suppresses eStaticServiceAppInfo::getEvent() for the actively playing service on the \"now\" query, working around a VTi ServiceName.py display bug (correct channel name instead of event title) at the cost of a missing \"now playing\" entry for that one service in channel lists\n"
 	},
 	 {NULL,NULL,0,NULL}
 };
@@ -2318,6 +2403,7 @@ static void pre_fault_bss(void) {
 	p = (volatile char *)&g_debugLoggingEnabled; *p = *p;
 	p = (volatile char *)&debugLvl; *p = *p;
 	p = (volatile char *)&g_probeMovieLengthEnabled; *p = *p;
+	p = (volatile char *)&g_ServiceNameWorkaroundEnabled; *p = *p;
 }
 #endif
 

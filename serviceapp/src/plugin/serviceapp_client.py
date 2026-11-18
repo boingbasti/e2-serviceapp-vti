@@ -51,7 +51,7 @@ def setUseUserSettings():
 	serviceapp.use_user_settings()
 
 
-def setServiceAppSettings(settingId, HLSExplorer, autoSelectStream, connectionSpeedInKb, autoTurnOnSubtitles=2, HLSAudioFilter=True, debugLoggingEnabled=None, probeMovieLengthEnabled=None):
+def setServiceAppSettings(settingId, HLSExplorer, autoSelectStream, connectionSpeedInKb, autoTurnOnSubtitles=2, HLSAudioFilter=True, debugLoggingEnabled=None, probeMovieLengthEnabled=None, servicenameWorkaroundEnabled=None):
 	# debugLoggingEnabled=None statt False: faellt ein Aufrufer (z.B. ein fremdes
 	# Plugin) diesen Parameter weg, soll der C-seitige Sentinel greifen und das
 	# bestehende Logging-Setting NICHT ungewollt abgeschaltet werden.
@@ -62,22 +62,38 @@ def setServiceAppSettings(settingId, HLSExplorer, autoSelectStream, connectionSp
 	# "autoTurnOnSubtitles=True" fuer Aufrufer ohne diesen Parameter nicht zu
 	# aendern. int(...) macht alte True/False-Aufrufe explizit zu 1/0.
 	autoTurnOnSubtitles = int(autoTurnOnSubtitles)
-	# probeMovieLengthEnabled kann in der C-Varargs-Reihenfolge nur mitgegeben
-	# werden, wenn debugLoggingEnabled auch mitgegeben wird - fehlt es, wird es
-	# aus dem aktuellen Setting nachgezogen, damit es nicht ungewollt auf False
-	# faellt (gleiches Muster wie pcmAudioExportEnabled in setExtEplayer3Settings).
+	# probeMovieLengthEnabled/servicenameWorkaroundEnabled koennen in der C-Varargs-
+	# Reihenfolge nur mitgegeben werden, wenn alle vorherigen optionalen Parameter
+	# auch mitgegeben werden - fehlen sie, werden sie aus dem aktuellen Setting
+	# nachgezogen, damit sie nicht ungewollt auf ihren C-seitigen Default
+	# zurueckfallen (gleiches Muster wie pcmAudioExportEnabled in
+	# setExtEplayer3Settings).
+	def _current(name, fallback):
+		from Components.config import config
+		try:
+			return getattr(config.plugins.serviceapp, name).value
+		except Exception:
+			return fallback
+
 	extra = []
 	if debugLoggingEnabled is not None:
 		extra.append(debugLoggingEnabled)
 		if probeMovieLengthEnabled is not None:
 			extra.append(probeMovieLengthEnabled)
+			if servicenameWorkaroundEnabled is not None:
+				extra.append(servicenameWorkaroundEnabled)
+		elif servicenameWorkaroundEnabled is not None:
+			extra.append(_current("probe_movie_length", True))
+			extra.append(servicenameWorkaroundEnabled)
 	elif probeMovieLengthEnabled is not None:
-		from Components.config import config
-		try:
-			dl = config.plugins.serviceapp.debug_logging.value
-		except Exception:
-			dl = False
-		extra.extend([dl, probeMovieLengthEnabled])
+		extra.append(_current("debug_logging", False))
+		extra.append(probeMovieLengthEnabled)
+		if servicenameWorkaroundEnabled is not None:
+			extra.append(servicenameWorkaroundEnabled)
+	elif servicenameWorkaroundEnabled is not None:
+		extra.append(_current("debug_logging", False))
+		extra.append(_current("probe_movie_length", True))
+		extra.append(servicenameWorkaroundEnabled)
 	return serviceapp.serviceapp_set_setting(settingId, HLSExplorer, autoSelectStream, connectionSpeedInKb, autoTurnOnSubtitles, HLSAudioFilter, *extra)
 
 def setGstreamerPlayerSettings(settingId, videoSink, audioSink, subtitleEnabled, bufferSize, bufferDuration):

@@ -327,6 +327,28 @@ static int kbhit(void)
     return 0;
 }
 
+/* Nicht blockierendes Lesen eines Kommandos. Das Ende einer Steuer-Pipe
+ * (oder eines Sockets) bedeutet, dass die schreibende Gegenseite weg ist:
+ * wird als Stopp-Kommando gewertet. Ein Terminal, /dev/null oder eine
+ * normale Datei auf stdin verhalten sich wie bisher, ein Player ohne
+ * Steuer-Pipe spielt also weiterhin bis zum Ende durch. */
+static char *ReadCommand(char *buff, int size)
+{
+    struct stat st;
+
+    if (fgets(buff, size, stdin))
+    {
+        return buff;
+    }
+    if (feof(stdin) && 0 == fstat(fileno(stdin), &st) &&
+        (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode)))
+    {
+        strcpy(buff, "q\n");
+        return buff;
+    }
+    return NULL;
+}
+
 static void SetBuffering()
 {
     static char buff[2048];
@@ -539,6 +561,7 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
         {
         case 'G':
             g_graphic_sub_path = optarg;
+            break;
         case 'W':
         {
             int val = atoi(optarg);
@@ -577,7 +600,7 @@ static int ParseParams(int argc,char* argv[], PlayFiles_t *playbackFiles, int *p
             break;
         case 'U':
             printf("Software decoder will be used for OPUS codec\n");
-            vorbis_software_decoder_set(atoi(optarg));
+            opus_software_decoder_set(atoi(optarg));
             break;
         case '3':
             printf("Software decoder will be used for AC3 codec\n");
@@ -818,7 +841,7 @@ int main(int argc, char* argv[])
     int commandRetVal = -1;
 
     /* inform client that we can handle additional commands */
-    E2iSendMsg("{\"EPLAYER3_EXTENDED\":{\"version\":%d}}\n", 185);
+    E2iSendMsg("{\"EPLAYER3_EXTENDED\":{\"version\":%d}}\n", 186);
 
     PlayFiles_t playbackFiles;
     memset(&playbackFiles, 0x00, sizeof(playbackFiles));
@@ -962,7 +985,7 @@ int main(int argc, char* argv[])
 
     	while( params.init_finished == 0 )
     	{
-            if( NULL == fgets(argvBuff, sizeof(argvBuff)-1 , stdin) )
+            if( NULL == ReadCommand(argvBuff, sizeof(argvBuff)-1) )
             {
                 /* wait for data - max 1s */
                 kbhit();
@@ -1040,7 +1063,7 @@ int main(int argc, char* argv[])
         while(g_player->playback->isPlaying && 0 == PlaybackDieNow(0))
         {
             /* we made fgets non blocking */
-            if( NULL == fgets(argvBuff, sizeof(argvBuff)-1 , stdin) )
+            if( NULL == ReadCommand(argvBuff, sizeof(argvBuff)-1) )
             {
                 /* wait for data - max 1s */
                 kbhit();

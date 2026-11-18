@@ -182,6 +182,7 @@ config_serviceapp.servicemp3.player                     = ConfigSelection(defaul
 config_serviceapp.debug_logging                         = ConfigBoolean(default=False)
 config_serviceapp.picon_sync                            = ConfigBoolean(default=False)
 config_serviceapp.probe_movie_length                    = ConfigBoolean(default=True)
+config_serviceapp.servicename_workaround                = ConfigBoolean(default=False)
 
 config_serviceapp.options                               = ConfigSubDict()
 config_serviceapp.options["servicemp3"]                 = ConfigSubsection()
@@ -259,6 +260,7 @@ def subtitle_config_key(key):
 def init_serviceapp_settings():
     debug_logging = config_serviceapp.debug_logging.value
     probe_movie_length = config_serviceapp.probe_movie_length.value
+    servicename_workaround = config_serviceapp.servicename_workaround.value
 
     for key in config_serviceapp.options.keys():
         setting_id           = key_to_setting_id(key)
@@ -272,7 +274,7 @@ def init_serviceapp_settings():
 
         serviceapp_client.setServiceAppSettings(setting_id, hls_explorer,
                 autoselect_stream, connection_speed_kb, autoturnon_subtitles, hls_audio_filter,
-                debug_logging, probe_movie_length)
+                debug_logging, probe_movie_length, servicename_workaround)
 
     for key in config_serviceapp.gstplayer.keys():
         setting_id = key_to_setting_id(key)
@@ -402,8 +404,9 @@ class ServiceAppSettings(ConfigListScreen, Screen):
         serviceapp_cfg = config_serviceapp.options[service_type]
         subtitle_cfg = config_serviceapp.options[subtitle_config_key(service_type)].autoturnon_subtitles
         if player_type == "exteplayer3":
+            exteplayer3_version_label = "%s+vti001" % EXTEPLAYER3_VERSION if EXTEPLAYER3_VERSION else "not installed"
             config_list.append(getConfigListEntry("  " + _("ExtEplayer3"),
-                ConfigSelection([EXTEPLAYER3_VERSION or "not installed"], EXTEPLAYER3_VERSION or "not installed")))
+                ConfigSelection([exteplayer3_version_label], exteplayer3_version_label)))
             if EXTEPLAYER3_VERSION:
                 config_list += self.exteplayer3_options(player_cfg)
                 config_list += self.serviceapp_options(serviceapp_cfg, subtitle_cfg)
@@ -428,6 +431,8 @@ class ServiceAppSettings(ConfigListScreen, Screen):
             config_serviceapp.picon_sync, _("Automatically create symlinks for 5001/5002 channels to standard DVB (1) picons.")))
         config_list.append(getConfigListEntry(_("Probe recording length (ffprobe)"),
             config_serviceapp.probe_movie_length, _("Needed for progress bars in movie lists (AEL, OpenWebif). Can slow down large network libraries noticeably - disable if movie lists load slowly.")))
+        config_list.append(getConfigListEntry(_("Show correct channel name for IPTV channels with EPG"),
+            config_serviceapp.servicename_workaround, _("VTi shows the current event's title instead of the channel name for IPTV channels (5001/5002) that have EPG data, in the Infobar and the display. Enabling this fixes that, but as a side effect the \"now playing\" entry for the currently active channel disappears from the channel list and the zap history overview (EPG for all other channels and timers stays unaffected). Off by default so existing setups keep behaving exactly as before unless you turn this on.")))
         if config_serviceapp.servicemp3.replace.value:
             configlist_servicemp3 = [getConfigListEntry("", ConfigNothing())]
             configlist_servicemp3.append(getConfigListEntry(_("ServiceMp3 (%s)" % str(serviceapp_client.ID_SERVICEMP3)), ConfigNothing()))

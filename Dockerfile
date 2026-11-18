@@ -26,7 +26,7 @@ RUN cd libsigc++-1.2.7 && \
     make install
 
 # Python 2.7 ARM headers (Ubuntu 18.04 hat nur x86 python2.7-dev)
-# Wir holen die armhf version
+# Holt die armhf-Version
 RUN dpkg --add-architecture armhf && \
     apt-get update && \
     apt-get install -y python2.7-dev:armhf libssl-dev:armhf libuchardet-dev:armhf || true

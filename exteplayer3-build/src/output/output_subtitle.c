@@ -375,8 +375,8 @@ static int Write(void *_context, void *data)
     {
         if (g_subWriter)
         {
-            g_subWriter = NULL;
             g_subWriter->close();
+            g_subWriter = NULL;
         }
 
         Flush();

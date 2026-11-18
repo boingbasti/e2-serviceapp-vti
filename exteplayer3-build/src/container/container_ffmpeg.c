@@ -90,6 +90,8 @@
 #define cERR_CONTAINER_FFMPEG_END_OF_FILE    -10
 
 #define IPTV_AV_CONTEXT_MAX_NUM 2
+
+#define DEFAULT_HTTP_USER_AGENT "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 /* ***************************** */
 /* Types                         */
 /* ***************************** */
@@ -800,12 +802,37 @@ static int32_t aac_get_frame_samples(const AVPacket *packet, AVStream *stream, i
         return 0;
     }
 
-    if (packet->duration > 0)
+    /* Bei AAC ist die Framelaenge codec-seitig fest (ueblicherweise 1024
+     * Samples). frame_size hat Vorrang vor packet->duration, weil Container
+     * wie Matroska eine 1ms-Zeitbasis nutzen und 21,333ms auf 21ms (1008
+     * Samples statt 1024) abrunden - das liess den Dejitter-Samplezaehler
+     * bei jedem Frame um 16 Samples driften. */
+    if (get_codecpar(stream)->frame_size > 0)
     {
-        return (int32_t)av_rescale_q(packet->duration, stream->time_base, (AVRational){1, *sampleRate});
+        return get_codecpar(stream)->frame_size;
     }
 
-    return get_codecpar(stream)->frame_size > 0 ? get_codecpar(stream)->frame_size : 0;
+    if (packet->duration > 0)
+    {
+        int32_t samples = (int32_t)av_rescale_q(packet->duration, stream->time_base, (AVRational){1, *sampleRate});
+        int32_t profile = get_codecpar(stream)->profile;
+
+        /* Fehlt frame_size (z.B. bei HE-AAC/SBR ohne gesetztes Profil-Feld), driftet
+         * dieselbe grobe Container-Zeitbasis weiterhin: 2016 statt 2048 Samples.
+         * Auf das naechste Vielfache von 1024 runden, ausser bei LD/ELD, die eine
+         * andere Framegroesse haben. */
+        if (profile != AV_PROFILE_AAC_LD && profile != AV_PROFILE_AAC_ELD && samples >= 512)
+        {
+            int32_t snapped = ((samples + 512) / 1024) * 1024;
+            if (FFABS(snapped - samples) * 20 <= snapped)
+            {
+                return snapped;
+            }
+        }
+        return samples;
+    }
+
+    return 1024;
 }
 
 static int64_t aac_pts_dejitter(AacPtsDejitter_t *s, const AVPacket *packet, AVStream *stream, int32_t trackId, uint32_t avIdx, int64_t pts)
@@ -836,6 +863,7 @@ static int64_t aac_pts_dejitter(AacPtsDejitter_t *s, const AVPacket *packet, AVS
         }
 
         ffmpeg_printf(10, "AAC PTS resync, diff %"PRId64" ms\n", diff / 90);
+        RAW_DEBUG_LOG("[exteplayer3] AAC PTS resync, diff %"PRId64" ms\n", diff / 90);
     }
 
     s->anchorPts  = pts;
@@ -1387,7 +1415,8 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
                                          int64_t *monoUsAtLastGoodPts,
                                          bool *outTrusted,
                                          int64_t *sessionBasePts,
-                                         bool suppressDeltaLearning)
+                                         bool suppressDeltaLearning,
+                                         bool *justSeeked)
 {
     int64_t nowUs = av_gettime_relative();
     /* Der reine Paketzaehler-Vergleich oben braucht bei z.B. 25fps bis zu 8s,
@@ -1612,7 +1641,21 @@ static int64_t resolveAndCachePtsOffset(PtsOffsetCacheEntry_t *cache, int cacheS
             *sessionBasePts = rawPts;
         }
         int64_t base = sessionBasePts ? *sessionBasePts : 0;
-        if (llabs(rawPts - base) > PTS_EPOCH_MISMATCH_THRESHOLD)
+        /* Nach einem echten Nutzer-Seek wird dieser Zweig absichtlich erneut
+         * durchlaufen (lastGoodPts/Cache wurden dafuer zurueckgesetzt), damit
+         * die neue Position ehrlich uebernommen wird. Der Abstand zu
+         * sessionBasePts ist dabei naturgemaess > 5s (das ist ja der Zweck
+         * eines Sprungs) - ohne diese Ausnahme griff hier faelschlich
+         * derselbe Epochen-Mismatch-Zweig wie bei einem echten kaputten
+         * Encoder und zog die Position bei jedem Seek > 5s zurueck auf ~0:
+         * ein Sprung in einer lokalen Datei landete dadurch immer wieder
+         * nahe der alten Stelle statt am Ziel. */
+        if (justSeeked && *justSeeked)
+        {
+            offset = base;
+            *justSeeked = false;
+        }
+        else if (llabs(rawPts - base) > PTS_EPOCH_MISMATCH_THRESHOLD)
         {
             offset = rawPts;
         }
@@ -2077,6 +2120,11 @@ static void FFMPEGThread(Context_t *context)
      * gelernt statt bei jedem Wechsel neu berechnet. */
     int64_t lastGoodVideoPts = -1;
     int64_t lastGoodAudioPts = -1;
+    /* Siehe Kommentar an der PTS_EPOCH_MISMATCH_THRESHOLD-Abfrage in
+     * resolveAndCachePtsOffset() - wird bei einem echten Seek auf true gesetzt
+     * und von der jeweiligen Spur beim naechsten eigenen Relearn konsumiert. */
+    bool videoJustSeeked = false;
+    bool audioJustSeeked = false;
     /* Wird von der zuerst startenden Spur (Audio oder Video, je nachdem was
      * zuerst ein Paket liefert) einmalig auf deren allerersten rohen PTS
      * gesetzt und danach von BEIDEN Spuren beim eigenen ersten Lernen als
@@ -2395,6 +2443,8 @@ static void FFMPEGThread(Context_t *context)
                     lastGoodAudioPts = -1;
                     memset(videoPtsOffsetCache, 0, sizeof(videoPtsOffsetCache));
                     memset(audioPtsOffsetCache, 0, sizeof(audioPtsOffsetCache));
+                    videoJustSeeked = true;
+                    audioJustSeeked = true;
                 }
                 flush_only = false;
                 reset_finish_timeout();
@@ -2813,7 +2863,8 @@ static void FFMPEGThread(Context_t *context)
                             &lastGoodVideoPtsMonoUs,
                             &lastGoodVideoPtsTrusted,
                             &sessionBasePts,
-                            use_custom_io[cAVIdx] != 0);
+                            use_custom_io[cAVIdx] != 0,
+                            &videoJustSeeked);
                     /* Andere OUTPUT_CLEAR-Stellen (Seek, DASH-Live-Tonspurwechsel)
                      * pruefen isPlaying/isSeeking direkt vor dem Command()-Aufruf
                      * erneut -- sonst kann ein parallel laufender Stop/Zap-Teardown
@@ -2957,7 +3008,8 @@ static void FFMPEGThread(Context_t *context)
                          * nochmal einen PTS fuer dasselbe Paket - hier also nur
                          * cachen/dts-Lookup versorgen, das eigentliche Lernen
                          * erst mit dem dekodierten Wert. */
-                        (use_custom_io[cAVIdx] != 0) || (audioTrack->inject_as_pcm == 1));
+                        (use_custom_io[cAVIdx] != 0) || (audioTrack->inject_as_pcm == 1),
+                        &audioJustSeeked);
                 if (currentAudioPts != INVALID_PTS_VALUE) ls_last_a = currentAudioPts;
                 dts = lookupCachedPtsOffset(
                         audioPtsOffsetCache, PTS_OFFSET_CACHE_SIZE, (void*)pktStream,
@@ -3298,7 +3350,8 @@ static void FFMPEGThread(Context_t *context)
                                 &lastGoodAudioPtsMonoUs,
                                 &lastGoodAudioPtsTrusted,
                                 &sessionBasePts,
-                                use_custom_io[cAVIdx] != 0);
+                                use_custom_io[cAVIdx] != 0,
+                                &audioJustSeeked);
                         if (currentAudioPts != INVALID_PTS_VALUE) ls_last_a = currentAudioPts;
                         out_samples = swr_convert(swr, &output[0], out_samples, (const uint8_t **) &decoded_frame->data[0], in_samples);
                         
@@ -4039,6 +4092,15 @@ int32_t container_ffmpeg_init_av_context(Context_t *context, char *filename, uin
          * kein Timeout, egal was bei "timeout" stand. */
         av_dict_set(&avio_opts, "rw_timeout", num, 0);
         av_dict_set(&avio_opts, "reconnect", "1", 0);
+        /* Dieses FFmpeg setzt keinen Browser-User-Agent als Standard fuer
+         * libavformats HTTP-Protokoll, ohne eigenen geht deshalb "Lavf/<Version>"
+         * raus, was manche Server mit einem stillen 403 blocken. -u (bzw.
+         * -f user_agent=...) ersetzt ihn, eine per -h mitgegebene User-Agent-
+         * Zeile geht beiden vor, genau wie bei libavformat selbst. */
+        if (!av_dict_get(avio_opts, "user_agent", NULL, 0))
+        {
+            av_dict_set(&avio_opts, "user_agent", DEFAULT_HTTP_USER_AGENT, 0);
+        }
         /* Manche HLS-Origins (z.B. ARD) liefern deutlich kleinere Playlists,
          * wenn Kompression angeboten wird -- FFmpeg kann gzip/deflate zwar
          * dekodieren (zlib ist eingebunden), fordert es aber nie selbst an.

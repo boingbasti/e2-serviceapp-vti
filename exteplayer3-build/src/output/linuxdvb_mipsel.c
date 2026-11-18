@@ -73,6 +73,10 @@ static struct DVBApiVideoInfo_s videoInfo = {-1,-1,-1,-1,-1};
 
 unsigned long long int sCURRENT_PTS = 0;
 bool isBufferedOutput = false;
+/* Wird gesetzt, sobald Video mit einer PTS ungleich 0 seit dem letzten Play,
+ * Stop, Flush oder Clear an den Decoder geschrieben wurde: ab dann ist ein
+ * VIDEO_GET_PTS von 0 keine echte Position mehr. */
+static volatile int videoPtsWritten;
 
 pthread_mutex_t LinuxDVBmutex;
 
@@ -658,6 +662,7 @@ int LinuxDvbClear(Context_t  *context __attribute__((unused)), char *type)
 
 int LinuxDvbPts(Context_t  *context __attribute__((unused)), unsigned long long int* pts) {
     int32_t ret = cERR_LINUXDVB_ERROR;
+    int zeroVideoPts = 0;
 
     linuxdvb_printf(50, "\n");
 
@@ -665,13 +670,31 @@ int LinuxDvbPts(Context_t  *context __attribute__((unused)), unsigned long long 
     if (videofd > -1 && !ioctl(videofd, VIDEO_GET_PTS, (void*)&sCURRENT_PTS))
     {
         ret = cERR_LINUXDVB_NO_ERROR;
+        /* Manche Broadcom-Treiber liefern VIDEO_GET_PTS fuer die gesamte
+         * Memory-Source-Sitzung als 0, oder bis der Decoder wieder laeuft.
+         * Wurde bereits Video mit einer PTS geschrieben, ist 0 keine echte
+         * Position mehr: dann wird die PTS des Audio-Decoders uebernommen,
+         * sofern vorhanden. */
+        zeroVideoPts = sCURRENT_PTS == 0 && videoPtsWritten;
     }
     else
     {
         linuxdvb_err("VIDEO_GET_PTS: ERROR %d, %s\n", errno, strerror(errno));
     }
 
-    if (ret != cERR_LINUXDVB_NO_ERROR)
+    if (zeroVideoPts)
+    {
+        unsigned long long int audioPts = 0;
+        if (audiofd > -1 && !ioctl(audiofd, AUDIO_GET_PTS, (void*)&audioPts) && audioPts != 0)
+        {
+            sCURRENT_PTS = audioPts;
+        }
+        else
+        {
+            linuxdvb_printf(50, "VIDEO_GET_PTS 0 nach geschriebenem Video, keine Audio-PTS\n");
+        }
+    }
+    else if (ret != cERR_LINUXDVB_NO_ERROR)
     {
         if (audiofd > -1 && !ioctl(audiofd, AUDIO_GET_PTS, (void*)&sCURRENT_PTS))
         {
@@ -940,10 +963,14 @@ static int Write(void  *_context, void *_out)
                 linuxdvb_err("%s\n", strerror(errno));
                 ret = cERR_LINUXDVB_ERROR;
             }
+            else if (res > 0 && call.Pts != 0 && call.Pts != INVALID_PTS_VALUE)
+            {
+                videoPtsWritten = 1;
+            }
         }
 
         free(Encoding);
-    } 
+    }
     else if (audio)
     {
         char *Encoding = NULL;
@@ -1055,10 +1082,12 @@ static int Command(void  *_context, OutputCmd_t command, void * argument) {
         ret = LinuxDvbClose(context, (char*)argument);
         reset(context);
         sCURRENT_PTS = 0;
+        videoPtsWritten = 0;
         break;
     }
     case OUTPUT_PLAY: {	// 4
         sCURRENT_PTS = 0;
+        videoPtsWritten = 0;
         ret = LinuxDvbPlay(context, (char*)argument);
         break;
     }
@@ -1066,12 +1095,14 @@ static int Command(void  *_context, OutputCmd_t command, void * argument) {
         reset(context);
         ret = LinuxDvbStop(context, (char*)argument);
         sCURRENT_PTS = 0;
+        videoPtsWritten = 0;
         break;
     }
     case OUTPUT_FLUSH: {
         ret = LinuxDvbFlush(context, (char*)argument);
         reset(context);
         sCURRENT_PTS = 0;
+        videoPtsWritten = 0;
         break;
     }
     case OUTPUT_PAUSE: {
@@ -1091,6 +1122,7 @@ static int Command(void  *_context, OutputCmd_t command, void * argument) {
         ret = LinuxDvbClear(context, (char*)argument);
         reset(context);
         sCURRENT_PTS = 0;
+        videoPtsWritten = 0;
         break;
     }
     case OUTPUT_PTS: {

@@ -112,7 +112,12 @@ static int32_t UpdateExtraData(uint8_t **ppExtraData, uint32_t *pExtraDataSize, 
     while (d + 4 < pData + dataSize)
     {
         uint32_t nalLen = ReadUint32(d);
-        
+        if (nalLen > (uint32_t)(pData + dataSize - d - 4))
+        {
+            h264_err("NAL length %u beyond the packet\n", nalLen);
+            return -1;
+        }
+
         uint8_t nalType = d[4] & 0x1f;
         if (nalType == 7) 
         { /* SPS */
@@ -461,13 +466,18 @@ static int writeData(void* _call)
             
             uint32_t pack_len = 0;
             uint32_t i = 0;
+            if (call->len - pos < NalLengthBytes)
+            {
+                h264_err("packet too short for a NAL length [%u]\n", call->len);
+                break;
+            }
             for (i = 0; i < NalLengthBytes; i++, pos++)
             {
                 pack_len <<= 8;
                 pack_len += call->data[pos];
             }
-            
-            if ( (pos + pack_len) > call->len )
+
+            if ( pack_len > call->len - pos )
             {
                 pack_len = call->len - pos;
             }

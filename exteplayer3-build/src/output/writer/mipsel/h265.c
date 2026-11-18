@@ -67,8 +67,11 @@
 static unsigned char           Head[] = {0, 0, 0, 1};
 static int                     initialHeader = 1;
 static unsigned int            NalLengthBytes = 1;
-static unsigned char           *CodecData     = NULL; 
+static unsigned char           *CodecData     = NULL;
 static unsigned int            CodecDataLen   = 0;
+static int                     resetPending = 0;
+static uint8_t                 *last_private_data;
+static unsigned int            last_private_size;
 /* ***************************** */
 /* Prototypes                    */
 /* ***************************** */
@@ -144,6 +147,11 @@ static int32_t PreparCodecData(unsigned char *data, unsigned int cd_len, unsigne
                 }
                 
                 CodecData = malloc(tmp_len);
+                if (!CodecData)
+                {
+                    h264_err("allocating codec data failed\n");
+                    return ret;
+                }
                 memcpy(CodecData, tmp, tmp_len);
                 CodecDataLen = tmp_len;
             }
@@ -157,9 +165,12 @@ static int32_t PreparCodecData(unsigned char *data, unsigned int cd_len, unsigne
     return ret;
 }
 
+/* reset() wird vom Command-Thread aufgerufen, waehrend der Demuxer-Thread
+ * sich in writeData() befinden kann: hinterlaesst nur eine Anforderung, die
+ * naechste writeData() nimmt sie entgegen. */
 static int reset()
 {
-    initialHeader = 1;
+    __atomic_store_n(&resetPending, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -199,7 +210,37 @@ static int writeData(void* _call)
         h264_err("file pointer < 0. ignoring ...\n");
         return 0;
     }
-    
+
+    if (__atomic_exchange_n(&resetPending, 0, __ATOMIC_ACQ_REL))
+    {
+        initialHeader = 1;
+    }
+
+    /* eine Groesse ohne Puffer ist ebenfalls keine Codec-Daten */
+    if (call->private_data == NULL)
+    {
+        call->private_size = 0;
+    }
+
+    /* Neue Parameter-Sets ohne Codec-Wechsel (z.B. eine andere Repraesentation
+     * eines adaptiven Streams): wie bei H.264 vor dem naechsten Bild nachreichen. */
+    if (call->private_size &&
+        (last_private_size != call->private_size ||
+         memcmp(last_private_data, call->private_data, call->private_size)))
+    {
+        uint8_t *copy = malloc(call->private_size);
+        if (!copy)
+        {
+            h264_err("allocating codec data failed\n");
+            return -1;
+        }
+        memcpy(copy, call->private_data, call->private_size);
+        free(last_private_data);
+        last_private_data = copy;
+        last_private_size = call->private_size;
+        initialHeader = 1;
+    }
+
     h265_printf(10, "H265 private_size: %u\n", call->private_size);
     h265_printf(10, "H265 private_data: %X %X %X %X %X %X\n",
         call->private_size > 0 ? call->private_data[0] : 0,
@@ -292,13 +333,18 @@ static int writeData(void* _call)
             
             uint32_t pack_len = 0;
             uint32_t i = 0;
+            if (call->len - pos < NalLengthBytes)
+            {
+                h264_err("packet too short for a NAL length [%u]\n", call->len);
+                break;
+            }
             for (i = 0; i < NalLengthBytes; i++, pos++)
             {
                 pack_len <<= 8;
                 pack_len += call->data[pos];
             }
-            
-            if ( (pos + pack_len) > call->len )
+
+            if ( pack_len > call->len - pos )
             {
                 pack_len = call->len - pos;
             }

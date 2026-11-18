@@ -246,11 +246,15 @@ static int32_t Write(WriterSubCallData_t *subPacket)
 #else
     AVPacket* pkt;
     pkt = av_packet_alloc();
+    if (!pkt)
+        return -1;
     pkt->data = subPacket->data;
     pkt->size = subPacket->len;
     pkt->pts  = subPacket->pts;
 
     int used = avcodec_decode_subtitle2(g_sys->p_context, &subtitle, &has_subtitle, pkt);
+    /* Die Daten gehoeren subPacket (pkt->buf ist NULL): gibt nur das Paket selbst frei */
+    av_packet_free(&pkt);
 #endif
     uint32_t width = g_sys->p_context->width > 0 ? g_sys->p_context->width : subPacket->width;
     uint32_t height = g_sys->p_context->height > 0 ? g_sys->p_context->height : subPacket->height;
@@ -290,6 +294,13 @@ static int32_t Write(WriterSubCallData_t *subPacket)
                 subtitle_printf(50, "SUB_REC: src  x[%d], y[%d], %dx%d\n", rec->x, rec->y, rec->w, rec->h);
                 subtitle_printf(50, "SUB_REC: dest x[%d], y[%d], %dx%d\n", desc_tab[j].x, desc_tab[j].y, desc_tab[j].w, desc_tab[j].h);
 
+                /* ein zu kleines Rechteck kann auf 0 herunterskaliert werden: swscale kann damit nicht umgehen */
+                if (rec->w <= 0 || rec->h <= 0 || desc_tab[j].w <= 0 || desc_tab[j].h <= 0)
+                {
+                    free(filepath);
+                    break;
+                }
+
                 uint8_t *data[AV_NUM_DATA_POINTERS] = {NULL};
                 int linesize[AV_NUM_DATA_POINTERS] = {0};
  
@@ -304,6 +315,13 @@ static int32_t Write(WriterSubCallData_t *subPacket)
                 }
 
                 g_sys->p_swctx = sws_getCachedContext(g_sys->p_swctx, rec->w, rec->h, AV_PIX_FMT_PAL8, desc_tab[j].w, desc_tab[j].h, AV_PIX_FMT_RGBA, SWS_BICUBIC, NULL, NULL, NULL); // SWS_FAST_BILINEAR
+                if (!g_sys->p_swctx)
+                {
+                    subtitle_err("cannot scale subtitle %dx%d to %dx%d\n", rec->w, rec->h, desc_tab[j].w, desc_tab[j].h);
+                    av_freep(&data[0]);
+                    free(filepath);
+                    break;
+                }
                 sws_scale(g_sys->p_swctx, (const uint8_t * const *)rec->data, rec->linesize, 0, rec->h, data, linesize);
 
                 if (0 == PNGPlugin_saveRGBAImage(filepath, &(data[0][0]), desc_tab[j].w, desc_tab[j].h))
